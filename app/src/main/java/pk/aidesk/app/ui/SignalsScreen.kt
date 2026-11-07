@@ -128,7 +128,7 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
                     T("Scan now", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { vm.scanNow() })
                 }
                 Gap(4.dp)
-                T(scan?.let { "Bar ${vm.engine.barTimeText(it.signals.firstOrNull()?.barTime ?: it.time)} PKT  -  scanned ${vm.engine.barTimeText(last)}" }
+                T(scan?.let { "Signals for the ${hhmm(it.signals.firstOrNull()?.signalTime ?: it.time)} PKT bar close  -  scanned ${hhmm(last)}" }
                     ?: "No scan yet. It runs at every 15-minute close.", 11.sp, C.Dim)
                 scan?.error?.let { T(it, 12.sp, C.Amber) }
                 Gap(8.dp)
@@ -151,13 +151,19 @@ fun SignalCard(s: Signal, onClick: () -> Unit) {
             HGap(8.dp)
             Pill(s.side, col, filled = s.strong)
             Box(Modifier.weight(1f))
-            T(if (s.strong) "STRONG" else "WEAK", 11.sp, if (s.strong) col else C.Muted, FontWeight.Bold)
+            Column(horizontalAlignment = Alignment.End) {
+                T(hhmm(s.since), 13.sp, C.Txt, FontWeight.SemiBold, mono = true)
+                val bars = ((s.signalTime - s.since) / Config.BAR_MS + 1).coerceAtLeast(1)
+                T(if (bars > 1) "active $bars bars" else "new", 10.sp, if (bars > 1) C.Muted else C.Amber)
+            }
         }
         Gap(6.dp)
-        Row {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             T("Win ${pct0(s.prob)}", 13.sp, C.Txt, FontWeight.SemiBold)
             HGap(14.dp)
             T("EV ${sgn2(s.evR)}R", 13.sp, if (s.evR > 0) col else C.Muted, FontWeight.SemiBold)
+            Box(Modifier.weight(1f))
+            T(if (s.strong) "STRONG" else "WEAK", 11.sp, if (s.strong) col else C.Muted, FontWeight.Bold)
         }
         Gap(6.dp)
         Bar(s.prob.toFloat(), col)
@@ -188,7 +194,7 @@ fun DetailScreen(vm: AppVM, symbol: String) {
                 Pill(s.side, col, filled = true); HGap(6.dp)
                 Pill(if (s.strong) "STRONG" else "WEAK", if (s.strong) col else C.Muted)
                 Box(Modifier.weight(1f))
-                T("bar ${vm.engine.barTimeText(s.barTime)} PKT", 11.sp, C.Muted)
+                T("signal since ${hhmm(s.since)} PKT  -  bar ${hhmm(s.signalTime)}", 11.sp, C.Muted)
             }
             Gap(8.dp)
             CandleChart(s, Modifier.fillMaxWidth().height(220.dp))

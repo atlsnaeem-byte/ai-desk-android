@@ -56,8 +56,14 @@ data class Signal(
     val entry: Double, val tp: Double, val sl: Double, val atr: Double,
     val patterns: List<String>, val drivers: List<Pair<String, Double>>,
     val o: List<Double>, val h: List<Double>, val l: List<Double>, val c: List<Double>,
+    /** When this signal (same side + strength) first appeared: the close time of its first bar. */
+    val since: Long = barTime + Config.BAR_MS,
 ) {
+    /** Close time of the bar this scan is based on. */
+    val signalTime: Long get() = barTime + Config.BAR_MS
+
     fun toJson(): JSONObject = JSONObject().apply {
+        put("since", since)
         put("symbol", symbol); put("barTime", barTime); put("price", price); put("side", side); put("strong", strong)
         put("prob", prob); put("pLong", pLong); put("pShort", pShort); put("evR", evR); put("entry", entry)
         put("tp", tp); put("sl", sl); put("atr", atr); put("patterns", JSONArray(patterns))
@@ -74,6 +80,7 @@ data class Signal(
             o.getJSONArray("patterns").let { a -> (0 until a.length()).map { a.getString(it) } },
             o.getJSONArray("drivers").let { a -> (0 until a.length()).map { a.getJSONArray(it).let { p -> p.getString(0) to p.getDouble(1) } } },
             dl(o.getJSONArray("o")), dl(o.getJSONArray("h")), dl(o.getJSONArray("l")), dl(o.getJSONArray("c")),
+            o.optLong("since", o.getLong("barTime") + Config.BAR_MS),
         )
     }
 }

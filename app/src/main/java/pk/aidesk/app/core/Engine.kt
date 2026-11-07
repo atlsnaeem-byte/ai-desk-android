@@ -110,7 +110,16 @@ class Engine(context: Context) {
             store.scan()?.let { store.saveScan(it.copy(error = "Binance did not respond (${e.javaClass.simpleName}); showing the last scan")) }
             throw e
         }
-        store.saveScan(Scan(api.nowMs(), sc.values.map { it.signal }))
+        // Keep the original start time while the same side + strength repeats on consecutive bars.
+        val prev = store.scan()?.signals?.associateBy { it.symbol } ?: emptyMap()
+        val tracked = sc.values.map { x ->
+            val s = x.signal
+            val p = prev[s.symbol]
+            val continues = p != null && p.side == s.side && p.strong == s.strong &&
+                s.barTime - p.barTime in 0..Config.BAR_MS
+            if (continues) s.copy(since = p!!.since) else s
+        }
+        store.saveScan(Scan(api.nowMs(), tracked))
 
         val st = store.state(c.mode, c.paperStartEquity)
         var foreign = emptyList<String>()
