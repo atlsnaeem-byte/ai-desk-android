@@ -8,13 +8,13 @@ data class Config(
     val mode: String = "paper",            // paper | testnet | live
     val auto: Boolean = false,
     val symbols: List<String> = DEFAULT_SYMBOLS,
-    val leverage: Int = 5,
+    val leverage: Int = 10,
     val marginType: String = "ISOLATED",
-    val riskPct: Double = 2.0,             // 1..20 % of equity lost at the stop
+    val riskPct: Double = 20.0,            // 1..50 % of equity lost at the stop
     val maxOpen: Int = 3,
-    val dailyLossPct: Double = 4.0,
-    val dailyProfitPct: Double = 6.0,
-    val minEvR: Double = 0.15,
+    val dailyLossPct: Double = 6.0,
+    val dailyProfitPct: Double = 100.0,
+    val minEvR: Double = 0.10,
     val soundMinProb: Double = 60.0,       // alert sound only when win chance >= this
     val quietStart: Int = -1,              // hour 0-23 PKT, -1 = off
     val quietEnd: Int = -1,
@@ -27,8 +27,9 @@ data class Config(
     val horizonBars: Int = 16,
 ) {
     companion object {
-        val DEFAULT_SYMBOLS = listOf("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
+        val DEFAULT_SYMBOLS_V1 = listOf("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
             "ADAUSDT", "LINKUSDT", "AVAXUSDT", "SUIUSDT")
+        val DEFAULT_SYMBOLS = DEFAULT_SYMBOLS_V1
         const val BAR_MS = 900_000L
     }
 }

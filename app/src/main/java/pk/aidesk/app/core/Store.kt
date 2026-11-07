@@ -125,6 +125,21 @@ class Store(ctx: Context) {
 
     // ---- config
     fun config(): Config {
+        val c = readConfig()
+        // One-time upgrade of saved settings to new defaults chosen by the user (v2: 7 Nov 2026).
+        if (prefs.getInt("defaultsVersion", 1) < 2) {
+            val d = Config()
+            val up = if (prefs.contains("config")) c.copy(leverage = d.leverage, riskPct = d.riskPct, dailyLossPct = d.dailyLossPct,
+                dailyProfitPct = d.dailyProfitPct, minEvR = d.minEvR,
+                symbols = (c.symbols + d.symbols.filter { it !in Config.DEFAULT_SYMBOLS_V1 }).distinct()) else c
+            saveConfig(up)
+            prefs.edit().putInt("defaultsVersion", 2).apply()
+            return up
+        }
+        return c
+    }
+
+    private fun readConfig(): Config {
         val o = prefs.getString("config", null)?.let { JSONObject(it) } ?: return Config()
         val d = Config()
         return Config(

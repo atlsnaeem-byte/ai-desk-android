@@ -166,12 +166,12 @@ fun SettingsScreen(vm: AppVM, act: MainActivity) {
                     "Default +0.15R (backtested). Lower = more trades with a thinner edge; higher = fewer, stronger trades.") {
                 save(vm.config.value.copy(minEvR = Math.round(it * 20) / 20.0))
             }
-            SliderRow("Risk per trade", cfg.riskPct.toFloat(), 1f..20f, 18, { "${it.toInt()}%" }, C.Amber,
+            SliderRow("Risk per trade", cfg.riskPct.toFloat(), 1f..50f, 48, { "${it.toInt()}%" }, C.Amber,
                 "Share of equity lost if the stop-loss is hit." + if (cfg.riskPct > cfg.dailyLossPct) " Above your daily loss limit: one loss pauses auto for the day." else "") {
                 save(vm.config.value.copy(riskPct = it.toInt().toDouble()))
             }
             Stepper("Leverage", "${cfg.leverage}x", "Applied on Binance at the next scan", onMinus = { save(cfg.copy(leverage = (cfg.leverage - 1).coerceAtLeast(1))) },
-                onPlus = { save(cfg.copy(leverage = (cfg.leverage + 1).coerceAtMost(20))) })
+                onPlus = { save(cfg.copy(leverage = (cfg.leverage + 1).coerceAtMost(50))) })
             RowBox {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     T("Margin type", 14.sp, modifier = Modifier.weight(1f))
