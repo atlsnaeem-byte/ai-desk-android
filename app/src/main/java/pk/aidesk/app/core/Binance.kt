@@ -142,6 +142,22 @@ class Binance(private val key: String? = null, private val secret: String? = nul
         )
     }
 
+    /** Last `bars` candles INCLUDING the one still forming (for the live chart). */
+    fun live(symbol: String, bars: Int = 60): Candles {
+        val a = get("/fapi/v1/klines", mapOf("symbol" to symbol, "interval" to "15m", "limit" to bars)) as JSONArray
+        val rows = (0 until a.length()).map { a.getJSONArray(it) }
+        return Candles(
+            LongArray(rows.size) { rows[it].getLong(0) },
+            DoubleArray(rows.size) { rows[it].getString(1).toDouble() },
+            DoubleArray(rows.size) { rows[it].getString(2).toDouble() },
+            DoubleArray(rows.size) { rows[it].getString(3).toDouble() },
+            DoubleArray(rows.size) { rows[it].getString(4).toDouble() },
+            DoubleArray(rows.size) { rows[it].getString(5).toDouble() },
+            DoubleArray(rows.size) { rows[it].getString(9).toDouble() },
+            LongArray(rows.size) { rows[it].getLong(6) },
+        )
+    }
+
     fun markPrices(): Map<String, Double> {
         val a = get("/fapi/v1/premiumIndex") as JSONArray
         return (0 until a.length()).associate { a.getJSONObject(it).let { o -> o.getString("symbol") to o.getString("markPrice").toDouble() } }

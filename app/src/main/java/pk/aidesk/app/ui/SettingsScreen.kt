@@ -149,8 +149,6 @@ fun SettingsScreen(vm: AppVM, act: MainActivity) {
             SectionTitle("Alerts")
             SliderRow("Sound only when win chance >=", cfg.soundMinProb.toFloat(), 50f..80f, 29, { "${it.toInt()}%" }, C.Green,
                 "Below this, notifications are silent.") { save(vm.config.value.copy(soundMinProb = it.toInt().toDouble())) }
-            SliderRow("Min EV for a strong signal", cfg.minEvR.toFloat(), 0f..0.5f, 9, { String.format(Locale.US, "%+.2fR", it) }, C.Blue,
-                "Model default +0.15R. Higher = fewer, stronger trades.") { save(vm.config.value.copy(minEvR = Math.round(it * 20) / 20.0)) }
             val qOn = cfg.quietStart >= 0
             SwitchRow("Quiet hours", if (qOn) "No sound ${"%02d".format(cfg.quietStart)}:00 - ${"%02d".format(cfg.quietEnd)}:00 PKT" else "Off", qOn) {
                 save(cfg.copy(quietStart = if (it) 1 else -1, quietEnd = if (it) 8 else -1))
@@ -163,6 +161,11 @@ fun SettingsScreen(vm: AppVM, act: MainActivity) {
             }
 
             SectionTitle("Trading")
+            SliderRow("Min EV (signal strength)", cfg.minEvR.toFloat(), 0f..1f, 19, { String.format(Locale.US, "%+.2fR", it) }, C.Blue,
+                "A signal is STRONG (and auto-traded) only when its expected value is at least this. " +
+                    "Default +0.15R (backtested). Lower = more trades with a thinner edge; higher = fewer, stronger trades.") {
+                save(vm.config.value.copy(minEvR = Math.round(it * 20) / 20.0))
+            }
             SliderRow("Risk per trade", cfg.riskPct.toFloat(), 1f..20f, 18, { "${it.toInt()}%" }, C.Amber,
                 "Share of equity lost if the stop-loss is hit." + if (cfg.riskPct > cfg.dailyLossPct) " Above your daily loss limit: one loss pauses auto for the day." else "") {
                 save(vm.config.value.copy(riskPct = it.toInt().toDouble()))

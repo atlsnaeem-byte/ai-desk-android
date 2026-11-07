@@ -117,7 +117,7 @@ class Engine(context: Context) {
             val p = prev[s.symbol]
             val continues = p != null && p.side == s.side && p.strong == s.strong &&
                 s.barTime - p.barTime in 0..Config.BAR_MS
-            if (continues) s.copy(since = p!!.since) else s
+            if (continues) s.copy(since = p!!.since, origEntry = p.origEntry, origTp = p.origTp, origSl = p.origSl) else s
         }
         store.saveScan(Scan(api.nowMs(), tracked))
 

@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -184,6 +185,12 @@ fun DetailScreen(vm: AppVM, symbol: String) {
     val acc by vm.account.collectAsState()
     val s = scan?.signals?.firstOrNull { it.symbol == symbol }
     val now = rememberNow()
+    val live by vm.live.collectAsState()
+    val liveError by vm.liveError.collectAsState()
+    DisposableEffect(symbol) {
+        vm.startLive(symbol)
+        onDispose { vm.stopLive() }
+    }
     Column(Modifier.fillMaxSize().background(C.Bg)) {
         TopBar(vm, symbol) { vm.detail.value = null }
         if (s == null) { T("No data for $symbol yet.", 14.sp, C.Muted, modifier = Modifier.padding(16.dp)); return@Column }
@@ -197,14 +204,46 @@ fun DetailScreen(vm: AppVM, symbol: String) {
                 T("signal since ${hhmm(s.since)} PKT  -  bar ${hhmm(s.signalTime)}", 11.sp, C.Muted)
             }
             Gap(8.dp)
-            CandleChart(s, Modifier.fillMaxWidth().height(220.dp))
+            // ---- live chart: forming candle + live price vs the signal's original entry / TP / SL
+            val lv = live?.takeIf { it.symbol == symbol }
+            val e0 = s.origEntry; val tp0 = s.origTp; val sl0 = s.origSl
+            if (lv != null) {
+                val k = lv.candles
+                CandleChart(k.open.toList(), k.high.toList(), k.low.toList(), k.close.toList(), k.openTime.toList(),
+                    e0, tp0, sl0, s.since, lv.price, Modifier.fillMaxWidth().height(240.dp))
+            } else {
+                val n = s.c.size
+                CandleChart(s.o, s.h, s.l, s.c, List(n) { s.barTime - (n - 1 - it) * Config.BAR_MS },
+                    e0, tp0, sl0, s.since, null, Modifier.fillMaxWidth().height(240.dp))
+            }
+            Gap(6.dp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val blink = (now / 1000) % 2 == 0L
+                Box(Modifier.size(8.dp).clip(CircleShape).background(if (lv != null && blink) C.Red else C.Dim))
+                HGap(6.dp)
+                if (lv != null) {
+                    val dir = if (s.side == "LONG") 1 else -1
+                    val movePct = (lv.price / e0 - 1) * 100
+                    val moveR = dir * (lv.price - e0) / abs(e0 - sl0)
+                    val good = moveR >= 0
+                    T("LIVE  ", 11.sp, C.Red, FontWeight.Bold)
+                    T("Now ${px(lv.price)}", 13.sp, C.Blue, FontWeight.Bold, mono = true)
+                    HGap(8.dp)
+                    T("${String.format(java.util.Locale.US, "%+.2f", movePct)}% / ${sgn2(moveR)}R from entry", 12.sp,
+                        if (good) C.Green else C.Red, FontWeight.SemiBold)
+                } else T(liveError ?: "Connecting to live price...", 11.sp, if (liveError != null) C.Amber else C.Muted)
+            }
             Gap(8.dp)
             Card {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    for ((k, v, c) in listOf(Triple("Entry", px(s.entry), C.Txt), Triple("TP", px(s.tp), C.Green),
-                        Triple("SL", px(s.sl), C.Red), Triple("R:R", f2(abs(s.tp - s.entry) / abs(s.entry - s.sl)), C.Amber))) {
+                    for ((k, v, c) in listOf(Triple("Entry @${hhmm(s.since)}", px(e0), C.Txt), Triple("TP", px(tp0), C.Green),
+                        Triple("SL", px(sl0), C.Red), Triple("R:R", f2(abs(tp0 - e0) / abs(e0 - sl0)), C.Amber))) {
                         Column { T(k, 11.sp, C.Muted); T(v, 13.sp, c, mono = true) }
                     }
+                }
+                if (abs(s.entry - e0) > 1e-12) {
+                    Gap(4.dp)
+                    T("Latest bar levels: entry ${px(s.entry)}  TP ${px(s.tp)}  SL ${px(s.sl)}. Take uses the live price.", 11.sp, C.Muted)
                 }
                 Gap(6.dp)
                 T("Win ${pct0(s.prob)}   EV ${sgn2(s.evR)}R   Long ${pct0(s.pLong)} / Short ${pct0(s.pShort)}   max hold ${cfg.horizonBars} bars",
@@ -256,37 +295,55 @@ fun DetailScreen(vm: AppVM, symbol: String) {
     }
 }
 
+private fun argb(c: Color) = android.graphics.Color.argb((c.alpha * 255).toInt(), (c.red * 255).toInt(), (c.green * 255).toInt(), (c.blue * 255).toInt())
+
+/**
+ * Candles with the signal's entry / TP / SL. The TP/SL zones start at the candle where the signal
+ * began (`since` = close of its first bar). `livePrice` draws a blue line with a price tag.
+ */
 @Composable
-fun CandleChart(s: Signal, modifier: Modifier) {
+fun CandleChart(o: List<Double>, h: List<Double>, l: List<Double>, c: List<Double>, times: List<Long>,
+                entry: Double, tp: Double, sl: Double, since: Long, livePrice: Double?, modifier: Modifier) {
     Canvas(modifier.clip(RoundedCornerShape(10.dp)).background(C.Panel)) {
-        val n = s.c.size
+        val n = c.size
         if (n == 0) return@Canvas
-        var lo = min(s.l.min(), min(s.sl, s.tp)); var hi = max(s.h.max(), max(s.sl, s.tp))
+        var lo = minOf(l.min(), sl, tp, entry); var hi = maxOf(h.max(), sl, tp, entry)
         val pad = (hi - lo) * 0.06; lo -= pad; hi += pad
-        val left = 6f; val right = size.width - 46f
-        val cw = (right - left) / (n + 6)
+        val left = 6f; val right = size.width - 120f
+        val cw = (right - left) / (n + 2)
         fun y(v: Double) = (size.height * (1 - (v - lo) / (hi - lo))).toFloat()
-        // projected TP / SL zones after the last candle
-        val zx = left + cw * (n - 1)
+        fun x(i: Int) = left + cw * i + cw / 2
+        // entry candle = first candle opening at / after the signal time
+        val ei = times.indexOfFirst { it >= since }.let { if (it < 0) n - 1 else it }
+        val zx = x(ei) - cw / 2
         val zw = right - zx
-        drawRect(C.Green.copy(alpha = 0.16f), Offset(zx, min(y(s.tp), y(s.entry))), Size(zw, abs(y(s.tp) - y(s.entry))))
-        drawRect(C.Red.copy(alpha = 0.16f), Offset(zx, min(y(s.sl), y(s.entry))), Size(zw, abs(y(s.sl) - y(s.entry))))
+        drawRect(C.Green.copy(alpha = 0.15f), Offset(zx, min(y(tp), y(entry))), Size(zw, abs(y(tp) - y(entry))))
+        drawRect(C.Red.copy(alpha = 0.15f), Offset(zx, min(y(sl), y(entry))), Size(zw, abs(y(sl) - y(entry))))
         val dash = PathEffect.dashPathEffect(floatArrayOf(8f, 6f))
-        for ((v, c) in listOf(s.tp to C.Green, s.entry to C.Muted, s.sl to C.Red))
-            drawLine(c, Offset(left, y(v)), Offset(right, y(v)), 1.5f, pathEffect = dash)
+        drawLine(C.Amber.copy(alpha = 0.7f), Offset(zx, 0f), Offset(zx, size.height), 1.5f, pathEffect = dash)
+        for ((v, col) in listOf(tp to C.Green, entry to C.Txt, sl to C.Red))
+            drawLine(col, Offset(left, y(v)), Offset(right, y(v)), 1.5f, pathEffect = dash)
         for (i in 0 until n) {
-            val up = s.c[i] >= s.o[i]
-            val c = if (up) C.Green else C.Red
-            val cx = left + cw * i + cw / 2
-            drawLine(c, Offset(cx, y(s.h[i])), Offset(cx, y(s.l[i])), 1.5f)
-            val top = y(max(s.o[i], s.c[i])); val bot = y(min(s.o[i], s.c[i]))
-            drawRect(c, Offset(cx - cw * 0.32f, top), Size(cw * 0.64f, max(1.5f, bot - top)))
+            val col = if (c[i] >= o[i]) C.Green else C.Red
+            val cx = x(i)
+            drawLine(col, Offset(cx, y(h[i])), Offset(cx, y(l[i])), 1.5f)
+            val top = y(max(o[i], c[i])); val bot = y(min(o[i], c[i]))
+            drawRect(col, Offset(cx - cw * 0.32f, top), Size(cw * 0.64f, max(1.5f, bot - top)))
         }
-        // labels
-        val paint = android.graphics.Paint().apply { textSize = 26f; isAntiAlias = true; typeface = android.graphics.Typeface.MONOSPACE }
-        for ((v, c, l) in listOf(Triple(s.tp, C.Green, "TP"), Triple(s.entry, C.Muted, "E"), Triple(s.sl, C.Red, "SL"))) {
-            paint.color = android.graphics.Color.argb((c.alpha * 255).toInt(), (c.red * 255).toInt(), (c.green * 255).toInt(), (c.blue * 255).toInt())
-            drawContext.canvas.nativeCanvas.drawText(l, right + 6f, y(v) + 9f, paint)
+        val nc = drawContext.canvas.nativeCanvas
+        val paint = android.graphics.Paint().apply { textSize = 24f; isAntiAlias = true; typeface = android.graphics.Typeface.MONOSPACE }
+        for ((v, col, lab) in listOf(Triple(tp, C.Green, "TP"), Triple(entry, C.Txt, "Entry"), Triple(sl, C.Red, "SL"))) {
+            paint.color = argb(col)
+            nc.drawText(lab, right + 6f, y(v) + 8f, paint)
+        }
+        paint.color = argb(C.Amber); paint.textSize = 20f
+        nc.drawText("signal", zx + 4f, 22f, paint)
+        livePrice?.let { p ->
+            val ly = y(p.coerceIn(lo, hi))
+            drawLine(C.Blue, Offset(left, ly), Offset(right, ly), 2f)
+            drawRect(C.Blue, Offset(right + 2f, ly - 16f), Size(size.width - right - 2f, 32f))
+            paint.color = android.graphics.Color.WHITE; paint.textSize = 22f
+            nc.drawText(px(p), right + 6f, ly + 8f, paint)
         }
     }
 }

@@ -48,6 +48,34 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     val previewError = MutableStateFlow<String?>(null)
     private var poll: Job? = null
 
+    /** Live chart data for the open Signal detail (refreshed every 2 s). */
+    class Live(val symbol: String, val candles: pk.aidesk.app.core.Candles, val t: Long) {
+        val price: Double get() = candles.close.last()
+    }
+    val live = MutableStateFlow<Live?>(null)
+    val liveError = MutableStateFlow<String?>(null)
+    private var liveJob: Job? = null
+    private val pub = pk.aidesk.app.core.Binance()
+
+    fun startLive(symbol: String) {
+        liveJob?.cancel()
+        if (live.value?.symbol != symbol) live.value = null
+        liveJob = viewModelScope.launch {
+            while (isActive) {
+                try {
+                    val c = withContext(Dispatchers.IO) { pub.live(symbol, 60) }
+                    live.value = Live(symbol, c, System.currentTimeMillis())
+                    liveError.value = null
+                } catch (e: Exception) {
+                    liveError.value = "Live price paused: ${e.message ?: e.javaClass.simpleName}"
+                }
+                delay(2000)
+            }
+        }
+    }
+
+    fun stopLive() { liveJob?.cancel(); liveJob = null }
+
     init {
         viewModelScope.launch { TraderService.ticks.collect { reload() } }
         loadJournal()
