@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.AIDesk" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/panel</item>
+    </style>
+    <color name="bg">#0B0F17</color>
+    <color name="panel">#121A26</color>
+    <color name="accent">#16C784</color>
+</resources>
