@@ -166,11 +166,28 @@ class Binance(private val key: String? = null, private val secret: String? = nul
     fun markPrice(symbol: String) =
         (get("/fapi/v1/premiumIndex", mapOf("symbol" to symbol)) as JSONObject).getString("markPrice").toDouble()
 
+    /** symbol -> exchangeInfo entry (cached; fresh = re-download, e.g. to see new listings). */
+    fun exchangeInfo(fresh: Boolean = false): Map<String, JSONObject> {
+        if (!fresh) info?.let { return it }
+        val a = (get("/fapi/v1/exchangeInfo") as JSONObject).getJSONArray("symbols")
+        return (0 until a.length()).associate { a.getJSONObject(it).let { o -> o.getString("symbol") to o } }.also { info = it }
+    }
+
+    fun klines(symbol: String, interval: String, start: Long? = null, limit: Int = 500): JSONArray =
+        get("/fapi/v1/klines", mapOf("symbol" to symbol, "interval" to interval, "startTime" to start, "limit" to limit)) as JSONArray
+
+    fun ticker24h(): JSONArray = get("/fapi/v1/ticker/24hr") as JSONArray
+
+    fun premiumAll(): JSONArray = get("/fapi/v1/premiumIndex") as JSONArray
+
+    /** Sum of funding rates paid between t0 and t1 (a short RECEIVES +rate x notional). */
+    fun fundingSum(symbol: String, t0: Long, t1: Long): Double = runCatching {
+        val a = get("/fapi/v1/fundingRate", mapOf("symbol" to symbol, "startTime" to t0, "endTime" to t1, "limit" to 1000)) as JSONArray
+        (0 until a.length()).sumOf { a.getJSONObject(it).getString("fundingRate").toDouble() }
+    }.getOrDefault(0.0)
+
     fun filters(symbol: String): Filters {
-        val m = info ?: run {
-            val a = (get("/fapi/v1/exchangeInfo") as JSONObject).getJSONArray("symbols")
-            (0 until a.length()).associate { a.getJSONObject(it).let { o -> o.getString("symbol") to o } }.also { info = it }
-        }
+        val m = exchangeInfo()
         val fs = m[symbol]?.getJSONArray("filters") ?: throw BinanceException(0, null, "Unknown symbol $symbol")
         val f = (0 until fs.length()).associate { fs.getJSONObject(it).let { o -> o.getString("filterType") to o } }
         val lot = f["MARKET_LOT_SIZE"] ?: f.getValue("LOT_SIZE")
@@ -241,6 +258,17 @@ class Binance(private val key: String? = null, private val secret: String? = nul
         for (i in 0 until a.length()) {
             val o = a.getJSONObject(i)
             if (o.getString("incomeType") in setOf("REALIZED_PNL", "COMMISSION")) s += o.getString("income").toDouble()
+        }
+        return s
+    }
+
+    /** Realized PnL + commission + funding since startMs (everything a closed bot trade earned or paid). */
+    fun incomeSince(symbol: String, startMs: Long): Double {
+        val a = signed("GET", "/fapi/v1/income", mapOf("symbol" to symbol, "startTime" to startMs, "limit" to 1000)) as JSONArray
+        var s = 0.0
+        for (i in 0 until a.length()) {
+            val o = a.getJSONObject(i)
+            if (o.getString("incomeType") in setOf("REALIZED_PNL", "COMMISSION", "FUNDING_FEE")) s += o.getString("income").toDouble()
         }
         return s
     }

@@ -37,7 +37,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Scans crypto futures prices every 15 minutes and manages the user's open trades (TP/SL, time exit) in the background." />
+                android:value="Scans crypto futures prices every 15 minutes, follows the user's chosen copy-trading leaders every few seconds, and manages the user's open trades (TP/SL, time exit) in the background." />
         </service>
 
         <receiver android:name=".service.AlarmReceiver" android:exported="false" />

@@ -77,7 +77,9 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     fun stopLive() { liveJob?.cancel(); liveJob = null }
 
     init {
-        viewModelScope.launch { TraderService.ticks.collect { reload() } }
+        // Dispatchers.Main (not .immediate): run after the constructor, when all properties below exist.
+        viewModelScope.launch(Dispatchers.Main) { TraderService.ticks.collect { reload(); if (journalView.value == "signals") loadSigLog() } }
+        viewModelScope.launch(Dispatchers.Main) { TraderService.copyTicks.collect { if (tab.value == "bots" && botTab.value == "copy") loadCopy(false) } }
         loadJournal()
     }
 
@@ -169,6 +171,96 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     fun testKeys(mode: String) = act { withContext(Dispatchers.IO) { engine.testConnection(mode) }.joinToString("\n") }
 
     fun oneWay() = act { withContext(Dispatchers.IO) { engine.setOneWay() } }
+
+    // ------------------------------------------------------------------ bots tab
+    val botTab = MutableStateFlow("shorts")                       // shorts | copy
+    val shortHunter = pk.aidesk.app.core.ShortHunter(store)
+    val copyBot = pk.aidesk.app.core.CopyBot(store)               // reads/settings only; the service runs the trading one
+
+    class ShortsView(val cfg: pk.aidesk.app.core.ShortCfg, val listings: List<pk.aidesk.app.core.Listing>,
+                     val pumps: List<pk.aidesk.app.core.Pump>, val state: pk.aidesk.app.core.ShortState,
+                     val journal: List<pk.aidesk.app.core.ShortDone>, val at: Long)
+    val shorts = MutableStateFlow<ShortsView?>(null)
+    val shortsErr = MutableStateFlow<String?>(null)
+    val shortsLoading = MutableStateFlow(false)
+
+    fun loadShorts(market: Boolean = true) = viewModelScope.launch {
+        shortsLoading.value = true
+        try {
+            val mode = config.value.mode
+            val old = shorts.value
+            val v = withContext(Dispatchers.IO) {
+                val lst = if (market || old == null) shortHunter.listings(pub) else old.listings
+                val pm = if (market || old == null) runCatching { shortHunter.pumps(pub) }.getOrDefault(old?.pumps ?: emptyList()) else old.pumps
+                ShortsView(shortHunter.cfg(), lst, pm, shortHunter.state(mode), shortHunter.journal(mode).reversed(), System.currentTimeMillis())
+            }
+            shorts.value = v; shortsErr.value = null
+        } catch (e: Exception) {
+            shortsErr.value = e.message ?: e.javaClass.simpleName
+        } finally { shortsLoading.value = false }
+    }
+
+    fun saveShortCfg(c: pk.aidesk.app.core.ShortCfg) {
+        shortHunter.saveCfg(c)
+        shorts.value?.let { shorts.value = ShortsView(c, it.listings, it.pumps, it.state, it.journal, it.at) }
+        if (c.enabled) TraderService.start(getApplication())
+    }
+
+    class LeaderView(val leader: pk.aidesk.app.core.Leader, val detail: pk.aidesk.app.core.LeadDetail?,
+                     val positions: Map<String, pk.aidesk.app.core.LeadPos>?)
+    class CopyView(val cfg: pk.aidesk.app.core.CopyCfg, val state: pk.aidesk.app.core.CopyState,
+                   val open: List<Pair<pk.aidesk.app.core.CopyPos, Double?>>, val journal: List<pk.aidesk.app.core.CopyDone>,
+                   val leaders: List<LeaderView>, val at: Long)
+    val copy = MutableStateFlow<CopyView?>(null)
+    val copyErr = MutableStateFlow<String?>(null)
+
+    fun loadCopy(withLeaders: Boolean = true) = viewModelScope.launch {
+        try {
+            val mode = config.value.mode
+            val old = copy.value
+            val v = withContext(Dispatchers.IO) {
+                val cfg = copyBot.cfg()
+                val lv = if (withLeaders || old == null) cfg.leaders.map { l ->
+                    LeaderView(l, pk.aidesk.app.core.Bapi.detail(l.id), pk.aidesk.app.core.Bapi.positions(l.id))
+                } else cfg.leaders.map { l -> LeaderView(l, old.leaders.find { it.leader.id == l.id }?.detail, old.leaders.find { it.leader.id == l.id }?.positions) }
+                CopyView(cfg, copyBot.state(mode), copyBot.openWithMarks(mode, pub), copyBot.journal(mode).reversed(), lv, System.currentTimeMillis())
+            }
+            copy.value = v; copyErr.value = null
+        } catch (e: Exception) {
+            copyErr.value = e.message ?: e.javaClass.simpleName
+        }
+    }
+
+    fun saveCopyCfg(c: pk.aidesk.app.core.CopyCfg, reload: Boolean = false) {
+        copyBot.saveCfg(c)
+        copy.value?.let { v -> copy.value = CopyView(c, v.state, v.open, v.journal,
+            c.leaders.map { l -> LeaderView(l, v.leaders.find { it.leader.id == l.id }?.detail, v.leaders.find { it.leader.id == l.id }?.positions) }, v.at) }
+        TraderService.start(getApplication(), TraderService.ACTION_COPY)
+        if (reload) loadCopy(true)
+    }
+
+    fun addLeader(text: String) = act {
+        val id = pk.aidesk.app.core.Bapi.parseId(text) ?: throw pk.aidesk.app.core.UserError("Paste a Binance lead-trader link or portfolio ID.")
+        val c = copyBot.cfg()
+        if (c.leaders.any { it.id == id }) throw pk.aidesk.app.core.UserError("Already in the list.")
+        val d = withContext(Dispatchers.IO) { pk.aidesk.app.core.Bapi.detail(id) } ?: throw pk.aidesk.app.core.UserError("Binance has no lead trader $id.")
+        val note = if (d.show) "added by you" else "positions HIDDEN: cannot be copied"
+        saveCopyCfg(c.copy(leaders = c.leaders + pk.aidesk.app.core.Leader(id, d.name, false, note)), reload = true)
+        if (d.show) "Added ${d.name}. Switch it on to follow." else "Added ${d.name}, but they hide their positions, so the bot cannot copy them."
+    }
+
+    fun removeLeader(id: String) {
+        val c = copyBot.cfg()
+        saveCopyCfg(c.copy(leaders = c.leaders.filter { it.id != id }))
+    }
+
+    // ------------------------------------------------------------------ signal results
+    val sigLog = MutableStateFlow<List<pk.aidesk.app.core.SigRec>>(emptyList())
+    val journalView = MutableStateFlow("trades")                   // trades | signals
+
+    fun loadSigLog() = viewModelScope.launch { sigLog.value = withContext(Dispatchers.IO) { store.signalLog() }.sortedByDescending { it.since } }
+
+    fun clearSigLog() { store.clearSignalLog(); sigLog.value = emptyList() }
 
     fun finishSetup() {
         store.setupDone = true

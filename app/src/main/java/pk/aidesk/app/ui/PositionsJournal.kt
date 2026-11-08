@@ -125,7 +125,7 @@ private fun PositionCard(p: Position, cfg: Config, now: Long, onClose: () -> Uni
     Card(border = C.Border) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             T(p.symbol, 15.sp, C.Txt, FontWeight.Bold); HGap(8.dp); Pill(p.side, col, filled = true)
-            if (!p.tracked) { HGap(6.dp); Pill("external", C.Muted) }
+            if (!p.tracked) { HGap(6.dp); Pill(p.origin, if (p.origin == "external") C.Muted else C.Amber) }
             Box(Modifier.weight(1f))
             Column(horizontalAlignment = Alignment.End) {
                 T("${sgn2(p.upnl)} USDT", 15.sp, if (p.upnl >= 0) C.Green else C.Red, FontWeight.Bold)
@@ -170,9 +170,14 @@ fun JournalScreen(vm: AppVM) {
     val all by vm.journal.collectAsState()
     var open by remember { mutableStateOf<String?>(null) }
     val closed = all.filter { it.status == "closed" && it.pnl != null }
+    val view by vm.journalView.collectAsState()
     Column(Modifier.fillMaxSize()) {
         TopBar(vm, "Journal")
-        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+        Row(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Pill("My trades", if (view == "trades") C.Blue else C.Muted, filled = view == "trades") { vm.journalView.value = "trades" }
+            Pill("Signal results", if (view == "signals") C.Blue else C.Muted, filled = view == "signals") { vm.journalView.value = "signals"; vm.loadSigLog() }
+        }
+        if (view == "signals") SignalResults(vm) else LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     for (m in listOf("live", "testnet", "paper"))

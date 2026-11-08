@@ -65,12 +65,12 @@ import java.util.Locale
 
 // ------------------------------------------------------------------ rows
 @Composable
-private fun RowBox(content: @Composable () -> Unit) {
+internal fun RowBox(content: @Composable () -> Unit) {
     Box(Modifier.fillMaxWidth().padding(vertical = 1.dp).background(C.Panel).padding(horizontal = 12.dp, vertical = 10.dp)) { content() }
 }
 
 @Composable
-private fun SwitchRow(label: String, sub: String? = null, on: Boolean, onChange: (Boolean) -> Unit) = RowBox {
+internal fun SwitchRow(label: String, sub: String? = null, on: Boolean, onChange: (Boolean) -> Unit) = RowBox {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) { T(label, 14.sp); sub?.let { T(it, 11.sp, C.Muted) } }
         Switch(on, onChange, colors = SwitchDefaults.colors(checkedTrackColor = C.Green, checkedThumbColor = C.Txt))
@@ -78,14 +78,14 @@ private fun SwitchRow(label: String, sub: String? = null, on: Boolean, onChange:
 }
 
 @Composable
-private fun LinkRow(label: String, value: String, color: Color = C.Txt, onClick: () -> Unit) = RowBox {
+internal fun LinkRow(label: String, value: String, color: Color = C.Txt, onClick: () -> Unit) = RowBox {
     Row(Modifier.fillMaxWidth().clickable { onClick() }, verticalAlignment = Alignment.CenterVertically) {
         T(label, 14.sp, modifier = Modifier.weight(1f)); T("$value  >", 13.sp, color, FontWeight.SemiBold)
     }
 }
 
 @Composable
-private fun Stepper(label: String, value: String, sub: String? = null, color: Color = C.Txt, onMinus: () -> Unit, onPlus: () -> Unit) = RowBox {
+internal fun Stepper(label: String, value: String, sub: String? = null, color: Color = C.Txt, onMinus: () -> Unit, onPlus: () -> Unit) = RowBox {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) { T(label, 14.sp); sub?.let { T(it, 11.sp, C.Muted) } }
         Pill("  -  ", C.Muted, onClick = onMinus); HGap(10.dp)
@@ -95,7 +95,7 @@ private fun Stepper(label: String, value: String, sub: String? = null, color: Co
 }
 
 @Composable
-private fun SliderRow(label: String, value: Float, range: ClosedFloatingPointRange<Float>, steps: Int, text: (Float) -> String,
+internal fun SliderRow(label: String, value: Float, range: ClosedFloatingPointRange<Float>, steps: Int, text: (Float) -> String,
                       color: Color = C.Amber, sub: String? = null, onDone: (Float) -> Unit) = RowBox {
     var v by remember(value) { mutableFloatStateOf(value) }
     Column {

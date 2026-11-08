@@ -123,9 +123,11 @@ class Engine(context: Context) {
 
         val st = store.state(c.mode, c.paperStartEquity)
         var foreign = emptyList<String>()
+        // Coins held by the Short Hunter / Copy bots: not counted as "external" slots, never traded by the AI.
+        val botHeld = if (trading(c)) store.botSymbols(c.mode).keys else emptySet()
         if (trading(c)) {
             prepare(c, api)
-            foreign = manageLive(c, api, st, events)
+            foreign = manageLive(c, api, st, events).filter { it !in botHeld }
         } else managePaper(c, api, st, sc, events)
 
         val eq = equity(c, api, st)
@@ -140,7 +142,7 @@ class Engine(context: Context) {
         if (c.auto) {
             if (st.halted == null) {
                 val slots = c.maxOpen - st.open.size - foreign.size
-                val cands = strong.filter { it.symbol !in st.open && it.symbol !in foreign }.sortedByDescending { it.evR }
+                val cands = strong.filter { it.symbol !in st.open && it.symbol !in foreign && it.symbol !in botHeld }.sortedByDescending { it.evR }
                 for (sig in cands.take(maxOf(0, slots))) {
                     val res = openTrade(c, api, st, sig, eq, "auto", c.riskPct)
                     events += res
@@ -157,6 +159,11 @@ class Engine(context: Context) {
             }
         }
         store.saveState(c.mode, st)
+        try {   // record every signal's result, taken or not (never let this break trading)
+            SignalLog.update(store, c, tracked, sc.mapValues { it.value.candles }, st, api.nowMs())
+        } catch (e: Exception) {
+            store.log("WARN", "signal results: ${e.message ?: e.javaClass.simpleName}")
+        }
         store.lastCycle = System.currentTimeMillis()
         store.lastError = null
         events
@@ -450,12 +457,13 @@ class Engine(context: Context) {
             return Account(c.mode, st.equity + upnl, st.equity, upnl, ps, st.dayStart, st.halted)
         }
         val acc = api.account()
+        val owners = store.botSymbols(c.mode)
         val ps = api.positions().map { (s, p) ->
             val amt = p.getString("positionAmt").toDouble()
             val tr = st.open[s]
             Position(s, if (amt > 0) "LONG" else "SHORT", abs(amt), p.getString("entryPrice").toDouble(),
                 p.optString("markPrice").toDoubleOrNull(), p.optString("unRealizedProfit").toDoubleOrNull() ?: 0.0,
-                tr?.sl, tr?.tp, tr?.openedMs, tr != null, tr?.origin ?: "external")
+                tr?.sl, tr?.tp, tr?.openedMs, tr != null, tr?.origin ?: owners[s] ?: "external")
         }
         return Account(c.mode, acc.getString("totalMarginBalance").toDouble(), acc.getString("availableBalance").toDouble(),
             acc.getString("totalUnrealizedProfit").toDouble(), ps, st.dayStart, st.halted)

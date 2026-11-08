@@ -101,7 +101,7 @@ object Notifier {
             .setAutoCancel(true)
             .setGroup("aidesk_events")
             .setPriority(if (loud) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
-            .setColor(when (e.kind) { "open" -> 0xFF16C784.toInt(); "error" -> 0xFFEA3943.toInt(); else -> 0xFFF0B90B.toInt() })
+            .setColor(when (e.kind) { "open", "botopen" -> 0xFF16C784.toInt(); "error" -> 0xFFEA3943.toInt(); else -> 0xFFF0B90B.toInt() })
         when (e.kind) {
             "open" -> {
                 b.setContentIntent(openApp(ctx, id, "positions", sym))
@@ -115,6 +115,7 @@ object Notifier {
                 b.addAction(0, "View", openApp(ctx, id + 2, "signals", sym))
             }
             "close" -> b.setContentIntent(openApp(ctx, id, "journal", sym))
+            "botopen", "botclose" -> b.setContentIntent(openApp(ctx, id, "bots", sym))
             else -> b.setContentIntent(openApp(ctx, id, "signals"))
         }
         notify(ctx, id, b.build())

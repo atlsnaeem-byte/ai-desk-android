@@ -14,12 +14,19 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import pk.aidesk.app.core.Binance
+import pk.aidesk.app.core.BinanceException
 import pk.aidesk.app.core.Config
+import pk.aidesk.app.core.CopyBot
 import pk.aidesk.app.core.Engine
+import pk.aidesk.app.core.ShortHunter
 import pk.aidesk.app.core.UserError
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -36,6 +43,9 @@ class TraderService : Service() {
 
         /** Bumped after every cycle so the UI can reload. */
         val ticks = MutableStateFlow(0L)
+        /** Bumped after every copy-trading poll. */
+        val copyTicks = MutableStateFlow(0L)
+        const val ACTION_COPY = "pk.aidesk.COPY"
         val running = MutableStateFlow(false)
         @Volatile var instance: TraderService? = null
 
@@ -77,11 +87,13 @@ class TraderService : Service() {
             }
             ACTION_REFRESH -> Notifier.updateStatus(this, engine)
             ACTION_CYCLE -> runCycle()
+            ACTION_COPY -> { copyBot.resetBaseline(); ensureCopyLoop() }
             else -> { // start / restart: catch up if the last scan is from an earlier bar
                 val bar = System.currentTimeMillis() / Config.BAR_MS * Config.BAR_MS
                 if (engine.store.lastCycle < bar + 8_000) runCycle() else schedule()
             }
         }
+        ensureCopyLoop()
         return START_STICKY
     }
 
@@ -112,6 +124,7 @@ class TraderService : Service() {
                     engine.store.log("ERROR", "cycle: $msg")
                     if (it is UserError) Notifier.problem(this@TraderService, msg)
                 }
+                runShortHunter()
             } finally {
                 ticks.value = System.currentTimeMillis()
                 Notifier.updateStatus(this@TraderService, engine)
@@ -120,6 +133,72 @@ class TraderService : Service() {
             }
         }
     }
+
+    /** Short Hunter: entries + exits once per 15-minute cycle (entry window is 6 h, exits are SL/TP orders on Binance). */
+    private fun runShortHunter() {
+        try {
+            val c = engine.cfg()
+            val api = engine.client(c)
+            api.syncTime()
+            val sh = ShortHunter(engine.store)
+            if (!sh.cfg().enabled && sh.state(c.mode).open.isEmpty()) return
+            sh.step(c.mode, api) { api.equity() }.forEach { Notifier.event(this, engine, it) }
+        } catch (e: Exception) {
+            engine.store.log("ERROR", "Short hunter: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    // ------------------------------------------------------------------ copy trading loop
+    private var copyJob: Job? = null
+    private val copyBot by lazy { CopyBot(engine.store) }
+    private var copyWl: PowerManager.WakeLock? = null
+
+    /** Started on service start and whenever copy settings change. Polls leaders every pollSec while copying is on. */
+    fun ensureCopyLoop() {
+        if (copyJob?.isActive == true) return
+        copyJob = scope.launch {
+            var idle = 0
+            while (isActive) {
+                val cc = copyBot.cfg()
+                val mode = engine.store.config().mode
+                val active = cc.enabled || copyBot.state(mode).copies.isNotEmpty()
+                if (!active) {
+                    copyWl?.let { if (it.isHeld) it.release() }
+                    if (++idle > 3) break                 // nothing to do: stop; settings changes restart it
+                    delay(30_000); continue
+                }
+                idle = 0
+                holdCopyWakeLock()
+                try {
+                    val c = engine.cfg()
+                    val api = engine.client(c)
+                    if (System.currentTimeMillis() - copySynced > 300_000) { api.syncTime(); copySynced = System.currentTimeMillis() }
+                    val ev = copyBot.step(c.mode, api, pub)
+                    ev.forEach { Notifier.event(this@TraderService, engine, it) }
+                    if (ev.isNotEmpty()) ticks.value = System.currentTimeMillis()
+                    copyTicks.value = System.currentTimeMillis()
+                } catch (e: Exception) {
+                    val m = (e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName
+                    if (m != lastCopyErr) engine.store.log("ERROR", "Copy: $m")
+                    lastCopyErr = m
+                }
+                delay(cc.pollSec.coerceIn(5, 120) * 1000L)
+            }
+            copyWl?.let { if (it.isHeld) it.release() }
+        }
+    }
+
+    private val pub = Binance()
+    private var copySynced = 0L
+    private var lastCopyErr: String? = null
+
+    private fun holdCopyWakeLock() {
+        val wl = copyWl ?: (getSystemService(POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aidesk:copy").apply { setReferenceCounted(false) }.also { copyWl = it }
+        wl.acquire(10 * 60_000L)   // renewed every poll; lapses by itself if the loop dies
+    }
+
+    fun resetCopyBaseline() = copyBot.resetBaseline()
 
     private fun alarmIntent(): PendingIntent = PendingIntent.getBroadcast(
         this, 1, Intent(this, AlarmReceiver::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -139,6 +218,7 @@ class TraderService : Service() {
     }
 
     override fun onDestroy() {
+        copyWl?.let { if (it.isHeld) it.release() }
         instance = null
         running.value = false
         scope.cancel()

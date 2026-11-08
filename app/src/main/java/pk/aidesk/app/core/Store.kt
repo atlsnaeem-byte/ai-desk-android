@@ -250,6 +250,31 @@ class Store(ctx: Context) {
         put("time", sc.time); put("signals", JSONArray(sc.signals.map { it.toJson() })); sc.error?.let { put("error", it) }
     }.toString())
 
+    // ---- generic JSON files (bots)
+    @Synchronized fun readObj(name: String): JSONObject? = read(name)?.let { runCatching { JSONObject(it) }.getOrNull() }
+    @Synchronized fun writeObj(name: String, o: JSONObject) = write(name, o.toString())
+    @Synchronized fun readArr(name: String): JSONArray? = read(name)?.let { runCatching { JSONArray(it) }.getOrNull() }
+    @Synchronized fun writeArr(name: String, a: JSONArray) = write(name, a.toString())
+
+    /** Symbols the Short Hunter / Copy bots hold in this mode -> owner label. The AI engine leaves them alone. */
+    fun botSymbols(mode: String): Map<String, String> {
+        val out = linkedMapOf<String, String>()
+        readObj("shorts_state_$mode.json")?.optJSONObject("open")?.keys()?.forEach { out[it] = "short hunter" }
+        readObj("copy_state_$mode.json")?.optJSONObject("copies")?.let { c ->
+            c.keys().forEach { k -> c.optJSONObject(k)?.optString("symbol")?.takeIf { it.isNotEmpty() }?.let { out[it] = "copy" } }
+        }
+        return out
+    }
+
+    // ---- signal results (every signal, taken or not)
+    @Synchronized fun signalLog(): List<SigRec> = readArr("signal_log.json")?.let { a ->
+        (0 until a.length()).mapNotNull { runCatching { SigRec.from(a.getJSONObject(it)) }.getOrNull() }
+    } ?: emptyList()
+
+    @Synchronized fun saveSignalLog(l: List<SigRec>) = writeArr("signal_log.json", JSONArray(l.takeLast(4000).map { it.toJson() }))
+
+    @Synchronized fun clearSignalLog() = writeArr("signal_log.json", JSONArray())
+
     // ---- status + log
     var lastCycle: Long
         get() = prefs.getLong("lastCycle", 0)

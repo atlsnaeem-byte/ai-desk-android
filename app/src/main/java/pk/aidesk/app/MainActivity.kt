@@ -39,6 +39,7 @@ import kotlinx.coroutines.delay
 import pk.aidesk.app.ui.AppTheme
 import pk.aidesk.app.ui.AppVM
 import pk.aidesk.app.ui.ApiKeyPage
+import pk.aidesk.app.ui.BotsScreen
 import pk.aidesk.app.ui.C
 import pk.aidesk.app.ui.DetailScreen
 import pk.aidesk.app.ui.JournalScreen
@@ -134,6 +135,7 @@ private fun MainNav(vm: AppVM, act: MainActivity) {
                 when (tab) {
                     "positions" -> PositionsScreen(vm)
                     "journal" -> JournalScreen(vm)
+                    "bots" -> BotsScreen(vm, act)
                     "settings" -> when (page) {
                         "apikey" -> ApiKeyPage(vm)
                         "logs" -> LogsPage(vm)
@@ -153,9 +155,9 @@ private fun MainNav(vm: AppVM, act: MainActivity) {
 @Composable
 private fun BottomNav(tab: String, onTab: (String) -> Unit) {
     Row(Modifier.fillMaxWidth().background(C.Panel).padding(vertical = 6.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-        for ((k, label) in listOf("signals" to "Signals", "positions" to "Positions", "journal" to "Journal", "settings" to "Settings")) {
+        for ((k, label) in listOf("signals" to "Signals", "positions" to "Positions", "bots" to "Bots", "journal" to "Journal", "settings" to "Settings")) {
             val on = k == tab
-            Column(Modifier.clip(RoundedCornerShape(10.dp)).clickable { onTab(k) }.padding(horizontal = 14.dp, vertical = 4.dp),
+            Column(Modifier.clip(RoundedCornerShape(10.dp)).clickable { onTab(k) }.padding(horizontal = 8.dp, vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(Modifier.clip(RoundedCornerShape(50)).background(if (on) androidx.compose.ui.graphics.Color(0xFF1D3A5C) else C.Panel)
                     .padding(horizontal = 16.dp, vertical = 5.dp)) {
