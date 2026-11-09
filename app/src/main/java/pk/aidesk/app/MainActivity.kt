@@ -27,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -99,11 +100,40 @@ class MainActivity : FragmentActivity() {
     }
 }
 
+/** SHA-256 of "aidesk:" + admin password (the password itself is not stored in the app). */
+private const val ADMIN_HASH = "324cdf715c40c1a4f5585018b83edc3646eaeefda9315c0ef78067758db90216"
+
+private fun sha256(s: String) = java.security.MessageDigest.getInstance("SHA-256").digest(s.toByteArray())
+    .joinToString("") { "%02x".format(it) }
+
+/** First start: ask for the admin password once; afterwards the phone remembers it. */
+@Composable
+private fun LockScreen(onOk: () -> Unit) {
+    var pin by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    var wrong by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    Column(Modifier.fillMaxSize().padding(28.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        T("AI Desk", 26.sp, C.Txt, FontWeight.Bold)
+        T("Enter the admin password", 14.sp, C.Muted, modifier = Modifier.padding(top = 6.dp, bottom = 18.dp))
+        androidx.compose.material3.OutlinedTextField(pin, { pin = it.filter { c -> c.isDigit() }.take(12); wrong = false }, singleLine = true,
+            colors = pk.aidesk.app.ui.fieldColors(),
+            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword),
+            modifier = Modifier.fillMaxWidth())
+        if (wrong) T("Wrong password", 13.sp, C.Red, modifier = Modifier.padding(top = 8.dp))
+        androidx.compose.foundation.layout.Spacer(Modifier.height(16.dp))
+        pk.aidesk.app.ui.Btn("Unlock", C.Green) { if (sha256("aidesk:$pin") == ADMIN_HASH) onOk() else wrong = true }
+        T("Asked once on this phone.", 11.sp, C.Dim, modifier = Modifier.padding(top = 10.dp))
+    }
+}
+
 @Composable
 fun App(vm: AppVM, act: MainActivity) {
     val setup by vm.setupDone.collectAsState()
     val toast by vm.toast.collectAsState()
+    val prefs = act.getSharedPreferences("aidesk", 0)
+    var unlocked by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(prefs.getBoolean("adminOk", false)) }
     Box(Modifier.fillMaxSize().background(C.Bg).systemBarsPadding()) {
+        if (!unlocked) { LockScreen { prefs.edit().putBoolean("adminOk", true).apply(); unlocked = true }; return@Box }
         if (!setup) SetupScreen(vm, act) else MainNav(vm, act)
         toast?.let { msg ->
             LaunchedEffect(msg) { delay(5000); if (vm.toast.value == msg) vm.toast.value = null }

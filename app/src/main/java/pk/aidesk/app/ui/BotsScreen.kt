@@ -85,6 +85,8 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
     val loading by vm.shortsLoading.collectAsState()
     LaunchedEffect(cfgApp.mode) { vm.loadShorts(true) }
     LaunchedEffect(Unit) { while (true) { delay(60_000); vm.loadShorts(false) } }
+    LaunchedEffect(Unit) { while (true) { vm.refreshMarks(); delay(15_000) } }
+    val marks by vm.marks.collectAsState()
     val c = v?.cfg ?: vm.shortHunter.cfg()
     val mode = cfgApp.mode
 
@@ -136,9 +138,17 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
         val open = v?.state?.open?.values?.toList() ?: emptyList()
         if (open.isEmpty()) item { T("No open shorts.", 13.sp, C.Muted) }
         for (p in open) item(key = "o" + p.symbol) {
-            Card(border = C.Border) {
-                Row { T(p.symbol, 14.sp, C.Txt, FontWeight.Bold); HGap(8.dp); Pill("SHORT", C.Red, filled = true); Box(Modifier.weight(1f)); T("${f2(p.margin)} USDT", 12.sp, C.Muted) }
-                T("Entry ${px(p.entry)} · SL ${px(p.sl)} · TP ${px(p.tp)}", 11.sp, C.Muted, mono = true)
+            val mk = marks[p.symbol]
+            val upnl = mk?.let { (p.entry - it) * p.qty }
+            Card(border = if (upnl == null) C.Border else pnlColor(upnl), onClick = { vm.showChart(p.symbol) }) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    T(p.symbol, 14.sp, C.Txt, FontWeight.Bold); HGap(8.dp); Pill("SHORT", C.Red, filled = true); Box(Modifier.weight(1f))
+                    Column(horizontalAlignment = Alignment.End) {
+                        T(upnl?.let { "${sgn2(it)} USDT" } ?: "-", 15.sp, pnlColor(upnl), FontWeight.Bold)
+                        upnl?.let { T("${sgn1(it / p.margin * 100)}% of ${f2(p.margin)} margin", 11.sp, pnlColor(it)) }
+                    }
+                }
+                T("Entry ${px(p.entry)} · now ${px(mk)} · SL ${px(p.sl)} · TP ${px(p.tp)}", 11.sp, C.Muted, mono = true)
                 T("Opened ${dayHhmm(p.opened)} · ${p.rule} · time exit ${dayHhmm(p.exitAt)}", 11.sp, C.Muted)
                 var ask by remember { mutableStateOf(false) }
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
@@ -320,7 +330,7 @@ private fun CopyPane(vm: AppVM, act: MainActivity) {
         val open = v?.open ?: emptyList()
         if (open.isEmpty()) item { T("No open copies. One opens the moment a followed trader opens a new position.", 13.sp, C.Muted) }
         for ((cp, u) in open) item(key = "c" + cp.leaderId + cp.key) {
-            Card(border = C.Border) {
+            Card(border = if (u == null) C.Border else pnlColor(u), onClick = { vm.showChart(cp.symbol) }) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     T(cp.symbol, 14.sp, C.Txt, FontWeight.Bold); HGap(8.dp); Pill(cp.side, C.side(cp.side), filled = true); HGap(6.dp)
                     T("${cp.lev}x", 11.sp, C.Muted); Box(Modifier.weight(1f))
@@ -401,8 +411,9 @@ private fun copySettings(vm: AppVM, c: pk.aidesk.app.core.CopyCfg) {
             onPlus = { save(c.copy(maxNotional = (c.maxNotional + 5).coerceAtMost(500.0))) })
         Stepper("Max leverage", "${c.maxLev}x", onMinus = { save(c.copy(maxLev = (c.maxLev - 1).coerceAtLeast(1))) },
             onPlus = { save(c.copy(maxLev = (c.maxLev + 1).coerceAtMost(20))) })
-        Stepper("Max open copies", "${c.maxPositions}", onMinus = { save(c.copy(maxPositions = (c.maxPositions - 1).coerceAtLeast(1))) },
-            onPlus = { save(c.copy(maxPositions = (c.maxPositions + 1).coerceAtMost(10))) })
+        Stepper("Max open copies", "${c.maxPositions}", "Up to 25 at a time; total exposure cap below still applies",
+            onMinus = { save(c.copy(maxPositions = (c.maxPositions - 1).coerceAtLeast(1))) },
+            onPlus = { save(c.copy(maxPositions = (c.maxPositions + 1).coerceAtMost(25))) })
         Stepper("Max total exposure", String.format(Locale.US, "%.1f× equity", c.maxExposureX),
             onMinus = { save(c.copy(maxExposureX = (c.maxExposureX - 0.5).coerceAtLeast(0.5))) },
             onPlus = { save(c.copy(maxExposureX = (c.maxExposureX + 0.5).coerceAtMost(10.0))) })

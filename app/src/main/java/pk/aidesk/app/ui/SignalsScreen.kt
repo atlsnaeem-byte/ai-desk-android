@@ -76,8 +76,27 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
     var filter by remember { mutableStateOf("all") }
     val now = rememberNow()
 
-    val sigs = (scan?.signals ?: emptyList()).sortedWith(compareByDescending<Signal> { it.strong }.thenByDescending { it.evR })
-    val shown = sigs.filter {
+    val log by vm.sigLog.collectAsState()
+    val marks by vm.marks.collectAsState()
+    LaunchedEffect(scan?.time) { vm.loadSigLog() }
+    LaunchedEffect(Unit) { while (true) { vm.refreshMarks(); delay(15_000) } }
+    // A signal is closed once its stop-loss or target was hit (bar check by the scanner, or the live price since then).
+    fun closedWhy(s: Signal): String? {
+        log.firstOrNull { it.symbol == s.symbol && it.side == s.side && it.since == s.since }?.outcome
+            ?.takeIf { it == "SL" || it == "TP" || it == "TIME" }?.let { return it }
+        val m = marks[s.symbol] ?: return null
+        val dr = if (s.side == "LONG") 1 else -1
+        return when {
+            (m - s.origSl) * dr <= 0 -> "SL"
+            (m - s.origTp) * dr >= 0 -> "TP"
+            else -> null
+        }
+    }
+    val all = (scan?.signals ?: emptyList()).sortedWith(compareByDescending<Signal> { it.strong }.thenByDescending { it.evR })
+    val closedMap = all.associate { it.symbol to closedWhy(it) }
+    val sigs = all.filter { closedMap[it.symbol] == null }
+    val closedSigs = all.filter { closedMap[it.symbol] != null }
+    val shown = (if (filter == "closed") closedSigs else sigs).filter {
         when (filter) { "strong" -> it.strong; "long" -> it.side == "LONG"; "short" -> it.side == "SHORT"; else -> true }
     }
     Column(Modifier.fillMaxSize()) {
@@ -123,7 +142,8 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
                 }
                 Gap(10.dp)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    for ((k, l) in listOf("all" to "All ${sigs.size}", "strong" to "Strong ${sigs.count { it.strong }}", "long" to "Long", "short" to "Short"))
+                    for ((k, l) in listOf("all" to "Active ${sigs.size}", "strong" to "Strong ${sigs.count { it.strong }}", "long" to "Long",
+                            "short" to "Short", "closed" to "Closed ${closedSigs.size}"))
                         Pill(l, if (filter == k) C.Blue else C.Muted, filled = filter == k) { filter = k }
                     Box(Modifier.weight(1f))
                     T("Scan now", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { vm.scanNow() })
@@ -134,7 +154,19 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
                 scan?.error?.let { T(it, 12.sp, C.Amber) }
                 Gap(8.dp)
             }
+            if (shown.isEmpty()) item {
+                T(if (filter == "closed") "No closed signals in this scan." else "No active signals: every signal of this scan already hit its stop or target. New ones come at the next 15-minute close.",
+                    13.sp, C.Muted, modifier = Modifier.padding(8.dp))
+            }
             items(shown, key = { it.symbol }) { s ->
+                val why = closedMap[s.symbol]
+                if (why != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Pill(when (why) { "SL" -> "STOP-LOSS HIT"; "TP" -> "TARGET HIT"; else -> "TIME EXIT" }, if (why == "TP") C.Green else C.Red, filled = true)
+                        HGap(6.dp); T("closed signal", 11.sp, C.Dim)
+                    }
+                    Gap(4.dp)
+                }
                 SignalCard(s) { vm.detail.value = s.symbol }
                 Gap(8.dp)
             }

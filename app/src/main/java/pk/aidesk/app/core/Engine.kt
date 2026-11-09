@@ -429,6 +429,14 @@ class Engine(context: Context) {
         api.syncTime()
         ManualDesk(store).closeSymbol(c, api, symbol)?.let { return@synchronized it }   // trade opened from the Trade tab
         val st = store.state(c.mode, c.paperStartEquity)
+        if (symbol !in st.open) {      // positions of the Short hunter / Copy bots: close through the bot so it records the result
+            val sh = ShortHunter(store)
+            if (symbol in sh.state(c.mode).open) return@synchronized sh.closeManual(c.mode, api, symbol)
+            val cb = CopyBot(store)
+            cb.state(c.mode).copies.entries.firstOrNull { it.value.symbol == symbol }?.let {
+                return@synchronized cb.closeManual(c.mode, api, Binance(), it.key)
+            }
+        }
         val msg = if (trading(c)) {
             val p = api.positions()[symbol] ?: throw UserError("No open $symbol position on Binance.")
             val ev = closeLive(c, api, st, symbol, p.getString("positionAmt").toDouble(), "MANUAL")
@@ -447,7 +455,19 @@ class Engine(context: Context) {
         val st = store.state(c.mode, c.paperStartEquity)
         if (!trading(c)) {
             val man = ManualDesk(store).paperOpen(c.mode)
-            val marks = if (st.open.isNotEmpty() || man.isNotEmpty()) runCatching { api.markPrices() }.getOrDefault(emptyMap()) else emptyMap()
+            val shorts = ShortHunter(store).state(c.mode).open.values.toList()
+            val copies = CopyBot(store).state(c.mode).copies.values.toList()
+            val any = st.open.isNotEmpty() || man.isNotEmpty() || shorts.isNotEmpty() || copies.isNotEmpty()
+            val marks = if (any) runCatching { api.markPrices() }.getOrDefault(emptyMap()) else emptyMap()
+            // bot positions use their own paper wallets: listed with live P&L, not added to this equity
+            val botPos = shorts.map { p ->
+                val mk = marks[p.symbol]
+                Position(p.symbol, "SHORT", p.qty, p.entry, mk, if (mk != null) p.qty * (p.entry - mk) else 0.0, p.sl, p.tp, p.opened, true, "short hunter")
+            } + copies.map { p ->
+                val mk = marks[p.symbol]
+                val dr = if (p.side == "LONG") 1 else -1
+                Position(p.symbol, p.side, p.qty, p.entry, mk, if (mk != null) p.qty * dr * (mk - p.entry) else 0.0, null, null, p.opened, true, "copy")
+            }
             var upnl = 0.0
             val ps = st.open.values.map { tr ->
                 val dr = if (tr.side == "LONG") 1 else -1
@@ -461,20 +481,22 @@ class Engine(context: Context) {
                 val u = if (mk != null) p.qty * p.dir * (mk - fill) else 0.0
                 upnl += u
                 Position(p.symbol, p.side, p.qty, fill, mk, u, p.sl, p.tp, p.filledMs, true, "manual")
-            }
+            } + botPos
             return Account(c.mode, st.equity + upnl, st.equity, upnl, ps, st.dayStart, st.halted)
         }
         val acc = api.account()
         val owners = store.botSymbols(c.mode)
         val man = ManualDesk(store).active(c.mode).filter { it.status == "open" }.associateBy { it.symbol }
+        val sh = ShortHunter(store).state(c.mode).open
         val ps = api.positions().map { (s, p) ->
             val amt = p.getString("positionAmt").toDouble()
             val tr = st.open[s]
             val mp = man[s]
+            val sp = sh[s]
             Position(s, if (amt > 0) "LONG" else "SHORT", abs(amt), p.getString("entryPrice").toDouble(),
                 p.optString("markPrice").toDoubleOrNull(), p.optString("unRealizedProfit").toDoubleOrNull() ?: 0.0,
-                tr?.sl ?: mp?.sl, tr?.tp ?: mp?.tp, tr?.openedMs ?: mp?.filledMs, tr != null || mp != null,
-                tr?.origin ?: owners[s] ?: "external")
+                tr?.sl ?: mp?.sl ?: sp?.sl, tr?.tp ?: mp?.tp ?: sp?.tp, tr?.openedMs ?: mp?.filledMs ?: sp?.opened,
+                tr != null || mp != null || sp != null, tr?.origin ?: owners[s] ?: "external")
         }
         return Account(c.mode, acc.getString("totalMarginBalance").toDouble(), acc.getString("availableBalance").toDouble(),
             acc.getString("totalUnrealizedProfit").toDouble(), ps, st.dayStart, st.halted)

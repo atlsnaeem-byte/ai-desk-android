@@ -1,6 +1,11 @@
 package pk.aidesk.app.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.input.pointer.pointerInput
+import kotlin.math.abs
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -25,6 +30,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -148,7 +154,11 @@ private fun CoinView(vm: AppVM, act: MainActivity, sym: String) {
     val cfg by vm.config.collectAsState()
     val plans by vm.manual.collectAsState()
     var sel by remember(sym, tf) { mutableStateOf(0) }
-    var bars by remember { mutableStateOf(120) }
+    var bars by remember { mutableStateOf(120f) }
+    var offset by remember(sym, tf) { mutableStateOf(0f) }
+    val live by vm.livePx.collectAsState()
+    val pos by vm.openPos.collectAsState()
+    var askClose by remember { mutableStateOf(false) }
     val ticket = remember(sym) { TicketState(cfg.leverage.coerceIn(1, 20)) }
     DisposableEffect(sym) { onDispose { vm.stopAnalysis() } }
     LaunchedEffect(sym) { vm.loadManual() }
@@ -164,26 +174,56 @@ private fun CoinView(vm: AppVM, act: MainActivity, sym: String) {
                 T("←", 22.sp, C.Txt, FontWeight.Bold, modifier = Modifier.clickable { vm.closeCoin() }.padding(end = 12.dp))
                 Column(Modifier.weight(1f)) {
                     T(sym.removeSuffix("USDT") + " / USDT", 18.sp, C.Txt, FontWeight.Bold)
-                    T(an?.let { px(it.price) } ?: "…", 13.sp, C.Muted, mono = true)
+                    T((live ?: an?.price)?.let { px(it) } ?: "…", 13.sp, C.Muted, mono = true)
                 }
                 if (loading) T("updating…", 11.sp, C.Dim)
                 HGap(8.dp)
                 Pill(cfg.mode.uppercase(), C.mode(cfg.mode), filled = true)
             }
+            // open position on this coin: live P&L
+            pos?.let { p ->
+                val now = live ?: an?.price
+                val pnl = now?.let { p.pnl(it) }
+                Card(border = if ((pnl ?: 0.0) >= 0) C.Green else C.Red) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Pill(p.side, C.side(p.side), filled = true); HGap(6.dp)
+                        T("Open · ${p.source}", 12.sp, C.Muted, modifier = Modifier.weight(1f), maxLines = 1)
+                        Column(horizontalAlignment = Alignment.End) {
+                            T(pnl?.let { "${sgn2(it)} USDT" } ?: "-", 17.sp, if ((pnl ?: 0.0) >= 0) C.Green else C.Red, FontWeight.Bold)
+                            if (pnl != null && p.margin != null && p.margin > 0)
+                                T(String.format(Locale.US, "%+.1f%% of margin", pnl / p.margin * 100), 11.sp, if (pnl >= 0) C.Green else C.Red)
+                        }
+                    }
+                    T("Entry ${px(p.entry)} · now ${px(now)} · qty ${px(p.qty)}" + (p.sl?.let { " · SL ${px(it)}" } ?: "") +
+                        (p.tp?.let { " · TP ${px(it)}" } ?: ""), 11.sp, C.Muted, mono = true)
+                    Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                        T(p.opened?.let { "opened ${dayHhmm(it)} · price updates every 3 s" } ?: "price updates every 3 s", 10.sp, C.Dim, modifier = Modifier.weight(1f))
+                        T("Close position", 13.sp, C.Red, FontWeight.Bold, modifier = Modifier.clickable { askClose = true })
+                    }
+                }
+                Gap(6.dp)
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 for (t in Advisor.TFS) Pill(t, if (t == tf) C.Blue else C.Muted, filled = t == tf) { vm.setTf(t) }
                 Box(Modifier.weight(1f))
-                for (b in listOf(60, 120, 240)) Pill("$b", if (b == bars) C.Txt else C.Dim, filled = false) { bars = b }
+                Pill("−", C.Muted) { bars = (bars * 1.4f).coerceAtMost(600f) }
+                Pill("+", C.Muted) { bars = (bars / 1.4f).coerceAtLeast(20f) }
+                if (offset > 0.5f) Pill("Now ▸", C.Blue) { offset = 0f }
             }
             Gap(8.dp)
             if (an == null) {
-                Box(Modifier.fillMaxWidth().height(320.dp).clip(RoundedCornerShape(12.dp)).background(C.Panel), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxWidth().height(340.dp).clip(RoundedCornerShape(12.dp)).background(C.Panel), contentAlignment = Alignment.Center) {
                     T(err ?: "Loading $tf chart…", 13.sp, if (err != null) C.Amber else C.Muted)
                 }
             } else {
-                PatternChart(an, bars, ticket.levels())
+                val maxOff = (an.closed.size - 20).coerceAtLeast(0).toFloat()
+                PatternChart(an, bars, offset, ticket.levels(), pos, live,
+                    onZoom = { z -> bars = (bars / z).coerceIn(20f, 600f) },
+                    onPan = { dBars -> offset = (offset + dBars).coerceIn(0f, maxOff) },
+                    onReset = { offset = 0f; bars = 120f })
                 Gap(4.dp)
                 Legend()
+                T("Pinch to zoom · drag sideways to scroll back · double-tap to reset", 10.sp, C.Dim)
             }
         }
         if (an != null) {
@@ -223,6 +263,15 @@ private fun CoinView(vm: AppVM, act: MainActivity, sym: String) {
         }
         item { Gap(32.dp) }
     }
+    if (askClose) AlertDialog(onDismissRequest = { askClose = false },
+        confirmButton = { TextButton({
+            askClose = false
+            if (cfg.mode == "live") act.confirmUser("Close LIVE $sym") { vm.close(sym) } else vm.close(sym)
+        }) { Text("Close at market", color = C.Red) } },
+        dismissButton = { TextButton({ askClose = false }) { Text("Keep") } },
+        title = { Text("Close $sym ${pos?.side ?: ""}?") },
+        text = { Text("Closes the position at market now and removes its SL/TP. The bot that opened it records the result.") },
+        containerColor = C.Panel)
 }
 
 @Composable
@@ -390,20 +439,38 @@ private val Ema20 = Color(0xFF3B82F6)
 private val Ema50 = Color(0xFFA78BFA)
 
 @Composable
-private fun PatternChart(a: Advisor.Analysis, barsWanted: Int, lv: ChartLevels?) {
-    Canvas(Modifier.fillMaxWidth().height(340.dp).clip(RoundedCornerShape(12.dp)).background(C.Panel)) {
-        drawPatternChart(a, barsWanted, lv)
+private fun PatternChart(a: Advisor.Analysis, bars: Float, offset: Float, lv: ChartLevels?, pos: AppVM.PosLine?, livePx: Double?,
+                         onZoom: (Float) -> Unit, onPan: (Float) -> Unit, onReset: () -> Unit) {
+    val visible by rememberUpdatedState(bars)
+    val zoomCb by rememberUpdatedState(onZoom)
+    val panCb by rememberUpdatedState(onPan)
+    val resetCb by rememberUpdatedState(onReset)
+    Canvas(Modifier.fillMaxWidth().height(360.dp).clip(RoundedCornerShape(12.dp)).background(C.Panel)
+        .pointerInput(Unit) {
+            detectTransformGestures { _, pan, zoom, _ ->
+                if (zoom != 1f) zoomCb(zoom)
+                if (pan.x != 0f) {
+                    val stepPx = size.width * 0.85f / visible.coerceAtLeast(20f)
+                    panCb(pan.x / stepPx)                       // drag right = look further back
+                }
+            }
+        }
+        .pointerInput(Unit) { detectTapGestures(onDoubleTap = { resetCb() }) }) {
+        drawPatternChart(a, bars.toInt(), offset.toInt(), lv, pos, livePx)
     }
 }
 
-private fun DrawScope.drawPatternChart(a: Advisor.Analysis, barsWanted: Int, lv: ChartLevels?) {
+private fun DrawScope.drawPatternChart(a: Advisor.Analysis, barsWanted: Int, offset: Int, lv: ChartLevels?, pos: AppVM.PosLine?, livePx: Double?) {
     val cl = a.closed
     val n = cl.size
     if (n < 5) return
-    val show = min(barsWanted, n)
-    val start = n - show
-    val fut = max(6, show / 10)
-    val hasForm = a.forming != null && a.forming.size > 0
+    val off = offset.coerceIn(0, max(0, n - 20))
+    val end = n - off                                    // exclusive: last visible closed candle = end - 1
+    val show = min(barsWanted.coerceAtLeast(20), end)
+    val start = end - show
+    val isNow = off == 0
+    val hasForm = isNow && a.forming != null && a.forming.size > 0
+    val fut = if (isNow) max(6, show / 10) else 0
     val slots = show + (if (hasForm) 1 else 0) + fut
     val axisW = 64.dp.toPx()
     val padT = 8.dp.toPx(); val padB = 18.dp.toPx()
@@ -412,138 +479,166 @@ private fun DrawScope.drawPatternChart(a: Advisor.Analysis, barsWanted: Int, lv:
     val step = W / slots
     fun x(i: Double) = ((i - start) + 0.5) * step
     fun x(i: Int) = x(i.toDouble())
-    val lastIdx = n - 1
-    val endIdx = n + fut                        // right edge (index space)
+    val endIdx = n + fut
 
-    // price range: candles + visible pattern lines + ticket levels
+    // forming candle with the live price
+    var fO = 0.0; var fH = 0.0; var fL = 0.0; var fC = 0.0
+    if (hasForm) {
+        val f = a.forming!!
+        fO = f.open[0]; fH = f.high[0]; fL = f.low[0]; fC = f.close[0]
+        livePx?.let { fC = it; fH = max(fH, it); fL = min(fL, it) }
+    }
+    val last = if (hasForm) fC else cl.close[end - 1]
+
+    // price range: visible candles + visible pattern lines + order / position levels
     var lo = Double.MAX_VALUE; var hi = -Double.MAX_VALUE
-    for (i in start until n) { lo = min(lo, cl.low[i]); hi = max(hi, cl.high[i]) }
-    if (hasForm) { lo = min(lo, a.forming!!.low[0]); hi = max(hi, a.forming.high[0]) }
+    for (i in start until end) { lo = min(lo, cl.low[i]); hi = max(hi, cl.high[i]) }
+    if (hasForm) { lo = min(lo, fL); hi = max(hi, fH) }
     val span0 = hi - lo
     fun incl(v: Double?) { if (v != null && v.isFinite() && v > lo - span0 && v < hi + span0) { lo = min(lo, v); hi = max(hi, v) } }
-    for (p in a.scan.active) { p.up?.let { incl(it.at(n)) }; p.dn?.let { incl(it.at(n)) } }
-    lv?.let { incl(it.entry); incl(it.sl); incl(it.tp) }
+    if (isNow) for (p in a.scan.active) { p.up?.let { incl(it.at(n)) }; p.dn?.let { incl(it.at(n)) } }
+    if (isNow) { lv?.let { incl(it.entry); incl(it.sl); incl(it.tp) }; pos?.let { incl(it.entry); incl(it.sl); incl(it.tp) } }
     val pad = (hi - lo) * 0.06 + 1e-12
     lo -= pad; hi += pad
     fun y(v: Double) = (padT + (1 - (v - lo) / (hi - lo)) * H).toFloat()
 
     val paint = android.graphics.Paint().apply { isAntiAlias = true; textSize = 10.sp.toPx(); color = C.Muted.toArgb() }
-    fun text(s: String, xx: Float, yy: Float, col: Color, bold: Boolean = false, alignRight: Boolean = false) {
+    fun text(s: String, xx: Float, yy: Float, col: Color, bold: Boolean = false) {
         paint.color = col.toArgb(); paint.isFakeBoldText = bold
-        paint.textAlign = if (alignRight) android.graphics.Paint.Align.RIGHT else android.graphics.Paint.Align.LEFT
         drawIntoCanvas { it.nativeCanvas.drawText(s, xx, yy, paint) }
     }
-    fun tag(v: Double, label: String, col: Color) {
-        val yy = y(v)
-        if (yy < padT || yy > padT + H) return
-        drawRect(col, Offset(W + 2f, yy - 8.dp.toPx()), Size(axisW - 4f, 16.dp.toPx()))
-        text(label, W + 5.dp.toPx(), yy + 3.5f.dp.toPx(), C.Bg, bold = true)
-    }
+    val tags = ArrayList<Triple<Double, String, Color>>()
 
-    // grid + axis
+    // grid + axis labels
     for (k in 0..4) {
         val v = lo + (hi - lo) * k / 4
         drawLine(C.Border.copy(alpha = 0.5f), Offset(0f, y(v)), Offset(W, y(v)), 1f)
         text(px(v), W + 4.dp.toPx(), y(v) + 3.dp.toPx(), C.Dim)
     }
-    // future area
-    val futX = (x(n + (if (hasForm) 1 else 0)) - step / 2).toFloat()
-    drawRect(C.Panel2.copy(alpha = 0.6f), Offset(futX, padT), Size(W - futX, H))
+    if (isNow) {
+        val futX = (x(n + (if (hasForm) 1 else 0)) - step / 2).toFloat()
+        drawRect(C.Panel2.copy(alpha = 0.6f), Offset(futX, padT), Size(W - futX, H))
+    }
 
-    // pattern zones (behind candles)
-    for (p in a.scan.active) {
-        val up = p.up; val dn = p.dn
-        if (up != null && dn != null && !p.neck) {
-            val s0 = max(p.start, start).toDouble()
-            val e0 = min(p.expires.toDouble(), endIdx.toDouble())
-            val path = Path().apply {
-                moveTo(x(s0).toFloat(), y(up.at(s0))); lineTo(x(e0).toFloat(), y(up.at(e0)))
-                lineTo(x(e0).toFloat(), y(dn.at(e0))); lineTo(x(s0).toFloat(), y(dn.at(s0))); close()
+    clipRect(0f, 0f, W, size.height) {
+        // pattern zones (behind candles)
+        for (p in a.scan.active) {
+            val up = p.up; val dn = p.dn
+            if (up != null && dn != null && !p.neck) {
+                val s0 = p.start.toDouble()
+                val e0 = min(p.expires.toDouble(), endIdx.toDouble())
+                val path = Path().apply {
+                    moveTo(x(s0).toFloat(), y(up.at(s0))); lineTo(x(e0).toFloat(), y(up.at(e0)))
+                    lineTo(x(e0).toFloat(), y(dn.at(e0))); lineTo(x(s0).toFloat(), y(dn.at(s0))); close()
+                }
+                val zc = when (p.bias) { 1 -> C.Green; -1 -> C.Red; else -> C.Blue }
+                drawPath(path, zc.copy(alpha = 0.10f))
             }
-            val zc = when (p.bias) { 1 -> C.Green; -1 -> C.Red; else -> C.Blue }
-            drawPath(path, zc.copy(alpha = 0.10f))
         }
-    }
-    // EMAs
-    for ((arr, col) in listOf(a.ema20 to Ema20, a.ema50 to Ema50)) {
-        val path = Path()
-        for (i in start until n) { val px0 = x(i).toFloat(); val py = y(arr[i]); if (i == start) path.moveTo(px0, py) else path.lineTo(px0, py) }
-        drawPath(path, col.copy(alpha = 0.7f), style = Stroke(1.2f.dp.toPx()))
-    }
-    // candles
-    val bw = max(1.5f, (step * 0.62f).toFloat())
-    fun candle(xc: Float, o: Double, h: Double, l: Double, c: Double, alpha: Float) {
-        val col = (if (c >= o) C.Green else C.Red).copy(alpha = alpha)
-        drawLine(col, Offset(xc, y(h)), Offset(xc, y(l)), 1.2f)
-        val top = y(max(o, c)); val bot = y(min(o, c))
-        drawRect(col, Offset(xc - bw / 2, top), Size(bw, max(1.5f, bot - top)))
-    }
-    for (i in start until n) candle(x(i).toFloat(), cl.open[i], cl.high[i], cl.low[i], cl.close[i], 1f)
-    if (hasForm) { val f = a.forming!!; candle(x(n).toFloat(), f.open[0], f.high[0], f.low[0], f.close[0], 0.55f) }
-
-    // pattern lines, points, labels (on top of candles)
-    val dash = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))
-    for (p in a.scan.active) {
-        val lines = listOfNotNull(p.up?.let { it to (if (p.neck) C.Amber else C.Red) }, p.dn?.let { it to (if (p.neck) C.Amber else C.Green) })
-        for ((ln, col) in lines) {
-            val s0 = (if (p.neck) ln.i0 else max(p.start, start)).coerceAtLeast(start).toDouble()
-            val nowI = n.toDouble()
-            val e0 = min(p.expires.toDouble(), endIdx.toDouble())
-            drawLine(col, Offset(x(s0).toFloat(), y(ln.at(s0))), Offset(x(nowI).toFloat(), y(ln.at(nowI))), 2.6f.dp.toPx())
-            if (e0 > nowI) drawLine(col, Offset(x(nowI).toFloat(), y(ln.at(nowI))), Offset(x(e0).toFloat(), y(ln.at(e0))), 2f.dp.toPx(), pathEffect = dash)
-        }
-        if (p.neck) {
+        // EMAs
+        for ((arr, col) in listOf(a.ema20 to Ema20, a.ema50 to Ema50)) {
             val path = Path()
-            p.points.filter { it.i >= start }.forEachIndexed { k, pt -> if (k == 0) path.moveTo(x(pt.i).toFloat(), y(pt.price)) else path.lineTo(x(pt.i).toFloat(), y(pt.price)) }
-            drawPath(path, C.Txt.copy(alpha = 0.55f), style = Stroke(1.4f.dp.toPx()))
+            for (i in start until end) { val px0 = x(i).toFloat(); val py = y(arr[i]); if (i == start) path.moveTo(px0, py) else path.lineTo(px0, py) }
+            drawPath(path, col.copy(alpha = 0.7f), style = Stroke(1.2f.dp.toPx()))
         }
-        for (pt in p.points) {
-            if (pt.i < start) continue
-            drawCircle(C.Panel, 4.5f.dp.toPx(), Offset(x(pt.i).toFloat(), y(pt.price)))
-            drawCircle(C.Txt, 4.5f.dp.toPx(), Offset(x(pt.i).toFloat(), y(pt.price)), style = Stroke(2f.dp.toPx()))
-            if (pt.label.isNotEmpty()) text(pt.label, x(pt.i).toFloat() - 10.dp.toPx(), y(pt.price) - 8.dp.toPx(), C.Txt, bold = true)
+        // candles
+        val bw = max(1.5f, (step * 0.62f).toFloat())
+        fun candle(xc: Float, o: Double, h: Double, l: Double, c: Double, alpha: Float) {
+            val col = (if (c >= o) C.Green else C.Red).copy(alpha = alpha)
+            drawLine(col, Offset(xc, y(h)), Offset(xc, y(l)), 1.2f)
+            val top = y(max(o, c)); val bot = y(min(o, c))
+            drawRect(col, Offset(xc - bw / 2, top), Size(bw, max(1.5f, bot - top)))
         }
-        val topV = listOfNotNull(p.up?.at(max(p.start, start)), p.points.maxOfOrNull { it.price }).maxOrNull() ?: continue
-        val nameX = x(max(p.start, start)).toFloat()
-        val nameY = (y(topV) - 10.dp.toPx()).coerceAtLeast(padT + 10.dp.toPx())
-        val nc = when (p.bias) { 1 -> C.Green; -1 -> C.Red; else -> C.Blue }
-        val label = "${p.name} · ${p.touches} touches"
-        paint.textSize = 10.sp.toPx(); paint.isFakeBoldText = true
-        val tw = paint.measureText(label)
-        drawRect(nc, Offset(nameX - 3.dp.toPx(), nameY - 11.dp.toPx()), Size(tw + 6.dp.toPx(), 15.dp.toPx()))
-        text(label, nameX, nameY, Color.White, bold = true)
-        // measured-move targets in the future area
-        val tx = x(n + fut * 0.6).toFloat()
-        p.up?.let { u -> if (p.bias >= 0) { val tv = u.at(n) + p.height; if (tv < hi) {
-            drawLine(C.Green, Offset(tx, y(u.at(n))), Offset(tx, y(tv)), 1.5f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 6f)))
-            drawLine(C.Green, Offset(tx - 10f, y(tv)), Offset(tx + 10f, y(tv)), 3f); text("target", tx - 16.dp.toPx(), y(tv) - 4.dp.toPx(), C.Green) } } }
-        p.dn?.let { d -> if (p.bias <= 0) { val tv = d.at(n) - p.height; if (tv > lo) {
-            drawLine(C.Red, Offset(tx, y(d.at(n))), Offset(tx, y(tv)), 1.5f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 6f)))
-            drawLine(C.Red, Offset(tx - 10f, y(tv)), Offset(tx + 10f, y(tv)), 3f); text("target", tx - 16.dp.toPx(), y(tv) + 12.dp.toPx(), C.Red) } } }
-    }
-    // recent breakouts: arrows
-    for (b in a.scan.breakouts.filter { it.i >= start }.takeLast(4)) {
-        val xc = x(b.i).toFloat()
-        val col = if (b.side == 1) C.Green else C.Red
-        val yy = if (b.side == 1) y(cl.low[b.i]) + 12.dp.toPx() else y(cl.high[b.i]) - 12.dp.toPx()
-        val s = 6.dp.toPx()
-        val path = Path().apply {
-            if (b.side == 1) { moveTo(xc, yy - s); lineTo(xc - s, yy + s * 0.8f); lineTo(xc + s, yy + s * 0.8f) }
-            else { moveTo(xc, yy + s); lineTo(xc - s, yy - s * 0.8f); lineTo(xc + s, yy - s * 0.8f) }
-            close()
+        for (i in start until end) candle(x(i).toFloat(), cl.open[i], cl.high[i], cl.low[i], cl.close[i], 1f)
+        if (hasForm) candle(x(n).toFloat(), fO, fH, fL, fC, 0.6f)
+
+        // pattern lines, touch points, labels
+        val dash = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))
+        for (p in a.scan.active) {
+            val lines = listOfNotNull(p.up?.let { it to (if (p.neck) C.Amber else C.Red) }, p.dn?.let { it to (if (p.neck) C.Amber else C.Green) })
+            for ((ln, col) in lines) {
+                val s0 = (if (p.neck) ln.i0 else p.start).toDouble()
+                val nowI = n.toDouble()
+                val e0 = min(p.expires.toDouble(), endIdx.toDouble())
+                drawLine(col, Offset(x(s0).toFloat(), y(ln.at(s0))), Offset(x(nowI).toFloat(), y(ln.at(nowI))), 2.6f.dp.toPx())
+                if (e0 > nowI) drawLine(col, Offset(x(nowI).toFloat(), y(ln.at(nowI))), Offset(x(e0).toFloat(), y(ln.at(e0))), 2f.dp.toPx(), pathEffect = dash)
+                if (isNow) tags += Triple(ln.at(n), (if (p.neck) "NECK " else if (col == C.Red) "BRK↑ " else "BRK↓ ") + px(ln.at(n)), col)
+            }
+            if (p.neck) {
+                val path = Path()
+                p.points.forEachIndexed { k, pt -> if (k == 0) path.moveTo(x(pt.i).toFloat(), y(pt.price)) else path.lineTo(x(pt.i).toFloat(), y(pt.price)) }
+                drawPath(path, C.Txt.copy(alpha = 0.55f), style = Stroke(1.4f.dp.toPx()))
+            }
+            for (pt in p.points) {
+                drawCircle(C.Panel, 4.5f.dp.toPx(), Offset(x(pt.i).toFloat(), y(pt.price)))
+                drawCircle(C.Txt, 4.5f.dp.toPx(), Offset(x(pt.i).toFloat(), y(pt.price)), style = Stroke(2f.dp.toPx()))
+                if (pt.label.isNotEmpty()) text(pt.label, x(pt.i).toFloat() - 10.dp.toPx(), y(pt.price) - 8.dp.toPx(), C.Txt, bold = true)
+            }
+            val topV = listOfNotNull(p.up?.at(p.start), p.points.maxOfOrNull { it.price }).maxOrNull() ?: continue
+            val nameX = max(x(p.start).toFloat(), 4.dp.toPx())
+            val nameY = (y(topV) - 10.dp.toPx()).coerceAtLeast(padT + 10.dp.toPx())
+            val nc = when (p.bias) { 1 -> C.Green; -1 -> C.Red; else -> C.Blue }
+            val label = "${p.name} · ${p.touches} touches"
+            paint.textSize = 10.sp.toPx(); paint.isFakeBoldText = true
+            val tw = paint.measureText(label)
+            drawRect(nc, Offset(nameX - 3.dp.toPx(), nameY - 11.dp.toPx()), Size(tw + 6.dp.toPx(), 15.dp.toPx()))
+            text(label, nameX, nameY, Color.White, bold = true)
+            if (isNow) {   // measured-move targets in the future area
+                val tx = x(n + fut * 0.6).toFloat()
+                val dot = PathEffect.dashPathEffect(floatArrayOf(4f, 6f))
+                p.up?.let { u -> if (p.bias >= 0) { val tv = u.at(n) + p.height; if (tv < hi) {
+                    drawLine(C.Green, Offset(tx, y(u.at(n))), Offset(tx, y(tv)), 1.5f, pathEffect = dot)
+                    drawLine(C.Green, Offset(tx - 10f, y(tv)), Offset(tx + 10f, y(tv)), 3f); text("target", tx - 16.dp.toPx(), y(tv) - 4.dp.toPx(), C.Green) } } }
+                p.dn?.let { d -> if (p.bias <= 0) { val tv = d.at(n) - p.height; if (tv > lo) {
+                    drawLine(C.Red, Offset(tx, y(d.at(n))), Offset(tx, y(tv)), 1.5f, pathEffect = dot)
+                    drawLine(C.Red, Offset(tx - 10f, y(tv)), Offset(tx + 10f, y(tv)), 3f); text("target", tx - 16.dp.toPx(), y(tv) + 12.dp.toPx(), C.Red) } } }
+            }
         }
-        drawPath(path, col)
+        // breakout arrows
+        for (b in a.scan.breakouts.filter { it.i in start until end }.takeLast(6)) {
+            val xc = x(b.i).toFloat()
+            val col = if (b.side == 1) C.Green else C.Red
+            val yy = if (b.side == 1) y(cl.low[b.i]) + 12.dp.toPx() else y(cl.high[b.i]) - 12.dp.toPx()
+            val s = 6.dp.toPx()
+            val path = Path().apply {
+                if (b.side == 1) { moveTo(xc, yy - s); lineTo(xc - s, yy + s * 0.8f); lineTo(xc + s, yy + s * 0.8f) }
+                else { moveTo(xc, yy + s); lineTo(xc - s, yy - s * 0.8f); lineTo(xc + s, yy - s * 0.8f) }
+                close()
+            }
+            drawPath(path, col)
+        }
+        // open position (solid) and order ticket (dashed)
+        pos?.let { p ->
+            val xs = p.opened?.let { t -> val i = cl.openTime.indexOfFirst { it >= t }; if (i >= 0) x(i).toFloat() else x(n).toFloat() } ?: 0f
+            val pnlCol = if (p.pnl(last) >= 0) C.Green else C.Red
+            if (p.tp != null) drawRect(C.Green.copy(alpha = 0.07f), Offset(xs, min(y(p.tp), y(p.entry))), Size(W - xs, abs(y(p.tp) - y(p.entry))))
+            if (p.sl != null) drawRect(C.Red.copy(alpha = 0.07f), Offset(xs, min(y(p.sl), y(p.entry))), Size(W - xs, abs(y(p.sl) - y(p.entry))))
+            drawLine(C.Amber, Offset(xs, y(p.entry)), Offset(W, y(p.entry)), 2f)
+            p.sl?.let { drawLine(C.Red, Offset(xs, y(it)), Offset(W, y(it)), 2f) }
+            p.tp?.let { drawLine(C.Green, Offset(xs, y(it)), Offset(W, y(it)), 2f) }
+            tags += Triple(p.entry, "POS " + px(p.entry), C.Amber)
+            p.sl?.let { tags += Triple(it, "SL " + px(it), C.Red) }
+            p.tp?.let { tags += Triple(it, "TP " + px(it), C.Green) }
+            text("${p.side} ${String.format(Locale.US, "%+.2f", p.pnl(last))} USDT", xs + 4.dp.toPx(), y(p.entry) - 5.dp.toPx(), pnlCol, bold = true)
+        }
+        if (lv != null && pos == null) {
+            val dd = PathEffect.dashPathEffect(floatArrayOf(10f, 6f))
+            lv.entry?.let { drawLine(C.Txt, Offset(0f, y(it)), Offset(W, y(it)), 1.5f, pathEffect = dd); tags += Triple(it, "ENTRY", C.Txt) }
+            lv.sl?.let { drawLine(C.Red, Offset(0f, y(it)), Offset(W, y(it)), 1.5f, pathEffect = dd); tags += Triple(it, "SL " + px(it), C.Red) }
+            lv.tp?.let { drawLine(C.Green, Offset(0f, y(it)), Offset(W, y(it)), 1.5f, pathEffect = dd); tags += Triple(it, "TP " + px(it), C.Green) }
+        }
+        drawLine(C.Txt.copy(alpha = 0.5f), Offset(0f, y(last)), Offset(W, y(last)), 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(2f, 5f)))
     }
-    // ticket levels
-    if (lv != null) {
-        lv.entry?.let { drawLine(C.Txt, Offset(0f, y(it)), Offset(W, y(it)), 1.5f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f))); tag(it, "ENTRY", C.Txt) }
-        lv.sl?.let { drawLine(C.Red, Offset(0f, y(it)), Offset(W, y(it)), 1.5f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f))); tag(it, "SL " + px(it), C.Red) }
-        lv.tp?.let { drawLine(C.Green, Offset(0f, y(it)), Offset(W, y(it)), 1.5f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f))); tag(it, "TP " + px(it), C.Green) }
+    tags += Triple(last, px(last), C.Amber)
+
+    // right-axis tags, spread so they do not overlap
+    val th = 16.dp.toPx()
+    val placed = tags.map { Triple(y(it.first), it.second, it.third) }.filter { it.first in padT..(padT + H) }.sortedBy { it.first }.toMutableList()
+    for (k in 1 until placed.size) if (placed[k].first - placed[k - 1].first < th + 1) placed[k] = Triple(placed[k - 1].first + th + 1, placed[k].second, placed[k].third)
+    for ((yy, label, col) in placed) {
+        drawRect(col, Offset(W + 2f, yy - th / 2), Size(axisW - 4f, th))
+        text(label, W + 5.dp.toPx(), yy + 3.5f.dp.toPx(), C.Bg, bold = true)
     }
-    // last price
-    val last = if (hasForm) a.forming!!.close[0] else cl.close[lastIdx]
-    drawLine(C.Txt.copy(alpha = 0.5f), Offset(0f, y(last)), Offset(W, y(last)), 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(2f, 5f)))
-    tag(last, px(last), C.Amber)
     // time labels
     val tfMs = Advisor.TF_MS[a.tf] ?: 900_000L
     for (k in 0..3) {
@@ -551,5 +646,5 @@ private fun DrawScope.drawPatternChart(a: Advisor.Analysis, barsWanted: Int, lv:
         val t = cl.openTime[i]
         text(if (tfMs >= 3_600_000L) dayHhmm(t) else hhmm(t), x(i).toFloat() - 14.dp.toPx(), size.height - 4.dp.toPx(), C.Dim)
     }
+    if (!isNow) text("◂ ${off} candles back · double-tap for now", 6.dp.toPx(), padT + 12.dp.toPx(), C.Amber, bold = true)
 }
-

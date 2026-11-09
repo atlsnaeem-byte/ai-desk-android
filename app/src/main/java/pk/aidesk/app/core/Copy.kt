@@ -87,7 +87,7 @@ data class CopyCfg(
     val bumpToMin: Boolean = true,
     val maxNotional: Double = 75.0,
     val maxLev: Int = 10,
-    val maxPositions: Int = 4,
+    val maxPositions: Int = 25,
     val maxExposureX: Double = 3.0,
     val followAdds: Boolean = true,
     val stopPct: Double = 30.0,
@@ -99,7 +99,7 @@ data class CopyCfg(
         put("enabled", enabled); put("leaders", JSONArray(leaders.map { it.toJson() })); put("sizeMult", sizeMult); put("bumpToMin", bumpToMin)
         put("maxNotional", maxNotional); put("maxLev", maxLev); put("maxPositions", maxPositions); put("maxExposureX", maxExposureX)
         put("followAdds", followAdds); put("stopPct", stopPct); put("dailyLossPct", dailyLossPct); put("pollSec", pollSec)
-        put("paperStart", paperStart)
+        put("paperStart", paperStart); put("maxPosV25", true)
     }
 
     companion object {
@@ -117,7 +117,9 @@ data class CopyCfg(
             return CopyCfg(o.optBoolean("enabled", d.enabled),
                 o.optJSONArray("leaders")?.let { a -> (0 until a.length()).map { Leader.from(a.getJSONObject(it)) } } ?: d.leaders,
                 o.optDouble("sizeMult", d.sizeMult), o.optBoolean("bumpToMin", d.bumpToMin), o.optDouble("maxNotional", d.maxNotional),
-                o.optInt("maxLev", d.maxLev), o.optInt("maxPositions", d.maxPositions), o.optDouble("maxExposureX", d.maxExposureX),
+                // one-time upgrade (Nov 2026): the user asked for up to 25 copies; after that their own choice is kept
+                o.optInt("maxLev", d.maxLev), if (o.optBoolean("maxPosV25")) o.optInt("maxPositions", d.maxPositions) else d.maxPositions,
+                o.optDouble("maxExposureX", d.maxExposureX),
                 o.optBoolean("followAdds", d.followAdds), o.optDouble("stopPct", d.stopPct), o.optDouble("dailyLossPct", d.dailyLossPct),
                 o.optInt("pollSec", d.pollSec), o.optDouble("paperStart", d.paperStart))
         }

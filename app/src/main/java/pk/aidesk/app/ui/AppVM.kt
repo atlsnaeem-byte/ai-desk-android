@@ -319,9 +319,10 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     }
 
     fun closeCoin() {
-        anaJob?.cancel()
+        stopAnalysis()
         tradeSym.value = null
         analysis.value = null
+        openPos.value = null
     }
 
     fun setTf(tf: String) {
@@ -331,7 +332,40 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         startAnalysis()
     }
 
-    /** Re-analyse the open coin every 20 s while the Trade screen shows it. */
+    /** Live price (every 3 s) and the open position on this coin, for the chart + running P&L. */
+    val livePx = MutableStateFlow<Double?>(null)
+    val openPos = MutableStateFlow<PosLine?>(null)
+    private var pxJob: Job? = null
+
+    /** An open position on a coin, from whichever bot / tab opened it. */
+    class PosLine(val source: String, val side: String, val entry: Double, val qty: Double, val sl: Double?, val tp: Double?,
+                  val opened: Long?, val margin: Double?) {
+        fun pnl(px: Double) = qty * (px - entry) * (if (side == "LONG") 1 else -1)
+    }
+
+    /** Find the open position on `symbol` (short hunter, copy, manual trade tab, AI engine or exchange). */
+    fun findPosition(symbol: String): PosLine? {
+        val mode = config.value.mode
+        shortHunter.state(mode).open[symbol]?.let { return PosLine("Short hunter", "SHORT", it.entry, it.qty, it.sl, it.tp, it.opened, it.margin) }
+        copyBot.state(mode).copies.values.firstOrNull { it.symbol == symbol }?.let {
+            return PosLine("Copy · ${it.leader}", it.side, it.entry, it.qty, null, null, it.opened, it.qty * it.entry / it.lev)
+        }
+        desk.active(mode).firstOrNull { it.symbol == symbol && it.status == "open" }?.let {
+            return PosLine("Trade tab", it.side, it.fill ?: it.entry, it.qty, it.sl, it.tp, it.filledMs, null)
+        }
+        account.value?.positions?.firstOrNull { it.symbol == symbol }?.let {
+            return PosLine(if (it.origin == "external") "Binance (not from the app)" else it.origin, it.side, it.entry, it.qty, it.sl, it.tp, it.openedMs, null)
+        }
+        return null
+    }
+
+    /** Open the live chart of a coin in the Trade tab (from Positions / Bots). */
+    fun showChart(symbol: String) {
+        tab.value = "trade"; page.value = null; detail.value = null
+        openCoin(symbol)
+    }
+
+    /** Re-analyse the open coin every 10 s and refresh its price every 3 s while the Trade screen shows it. */
     fun startAnalysis() {
         anaJob?.cancel()
         anaJob = viewModelScope.launch {
@@ -340,19 +374,35 @@ class AppVM(app: Application) : AndroidViewModel(app) {
                 val tf = tradeTf.value
                 analysisLoading.value = true
                 try {
-                    val a = withContext(Dispatchers.IO) { pk.aidesk.app.core.Advisor.load(pub, s, tf) }
+                    val a = withContext(Dispatchers.IO) { pk.aidesk.app.core.Advisor.load(pub, s, tf, 800) }
                     if (s == tradeSym.value && tf == tradeTf.value) { analysis.value = a; analysisErr.value = null }
+                    openPos.value = withContext(Dispatchers.IO) { findPosition(s) }
                 } catch (e: Exception) {
                     analysisErr.value = "Could not load $s: ${e.message ?: e.javaClass.simpleName}"
                 } finally {
                     analysisLoading.value = false
                 }
-                delay(20_000)
+                delay(10_000)
+            }
+        }
+        pxJob?.cancel()
+        livePx.value = null
+        pxJob = viewModelScope.launch {
+            while (isActive) {
+                val s = tradeSym.value ?: break
+                runCatching { withContext(Dispatchers.IO) { pub.markPrice(s) } }.onSuccess { if (s == tradeSym.value) livePx.value = it }
+                delay(3_000)
             }
         }
     }
 
-    fun stopAnalysis() { anaJob?.cancel(); anaJob = null }
+    fun stopAnalysis() { anaJob?.cancel(); anaJob = null; pxJob?.cancel(); pxJob = null }
+
+    // ------------------------------------------------------------------ live marks (signals / bots)
+    val marks = MutableStateFlow<Map<String, Double>>(emptyMap())
+    fun refreshMarks() = viewModelScope.launch {
+        runCatching { withContext(Dispatchers.IO) { pub.markPrices() } }.onSuccess { marks.value = it }
+    }
 
     fun loadManual() = viewModelScope.launch {
         manual.value = withContext(Dispatchers.IO) { desk.plans(config.value.mode) }.sortedByDescending { it.created }

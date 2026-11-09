@@ -89,8 +89,8 @@ fun PositionsScreen(vm: AppVM) {
                 Gap(10.dp)
                 if (acc != null && acc!!.positions.isEmpty()) T("No open positions.", 14.sp, C.Muted, modifier = Modifier.padding(8.dp))
             }
-            items(acc?.positions ?: emptyList(), key = { it.symbol }) { p ->
-                PositionCard(p, cfg, now) { confirm = p.symbol }
+            items(acc?.positions ?: emptyList(), key = { it.symbol + "|" + it.origin }) { p ->
+                PositionCard(p, cfg, now, onOpen = { vm.showChart(p.symbol) }) { confirm = p.symbol }
                 Gap(8.dp)
             }
             item {
@@ -118,14 +118,14 @@ fun hhmm(ms: Long): String = DateTimeFormatter.ofPattern("HH:mm").withZone(pk.ai
 fun dayHhmm(ms: Long): String = DateTimeFormatter.ofPattern("EEE HH:mm").withZone(pk.aidesk.app.core.Engine.PKT).format(Instant.ofEpochMilli(ms))
 
 @Composable
-private fun PositionCard(p: Position, cfg: Config, now: Long, onClose: () -> Unit) {
+private fun PositionCard(p: Position, cfg: Config, now: Long, onOpen: () -> Unit, onClose: () -> Unit) {
     val col = C.side(p.side)
     val slD = p.sl?.let { abs(p.entry - it) }
     val r = if (slD != null && slD > 0) p.upnl / (p.qty * slD) else null
-    Card(border = C.Border) {
+    Card(border = C.Border, onClick = onOpen) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             T(p.symbol, 15.sp, C.Txt, FontWeight.Bold); HGap(8.dp); Pill(p.side, col, filled = true)
-            if (!p.tracked) { HGap(6.dp); Pill(p.origin, if (p.origin == "external") C.Muted else C.Amber) }
+            if (p.origin != "auto") { HGap(6.dp); Pill(p.origin, if (p.origin == "external") C.Muted else C.Amber) }
             Box(Modifier.weight(1f))
             Column(horizontalAlignment = Alignment.End) {
                 T("${sgn2(p.upnl)} USDT", 15.sp, if (p.upnl >= 0) C.Green else C.Red, FontWeight.Bold)
@@ -155,8 +155,12 @@ private fun PositionCard(p: Position, cfg: Config, now: Long, onClose: () -> Uni
         Gap(8.dp)
         Row(verticalAlignment = Alignment.CenterVertically) {
             val opened = p.openedMs
-            val txt = if (opened == null) "not opened by the app" else
-                "held ${((now - opened) / Config.BAR_MS).coerceAtLeast(0)} of ${cfg.horizonBars} bars  -  auto-exit ${hhmm(opened + cfg.horizonBars * Config.BAR_MS)}"
+            val txt = when {
+                opened == null -> "not opened by the app  ·  tap for chart"
+                p.origin == "auto" ->
+                    "held ${((now - opened) / Config.BAR_MS).coerceAtLeast(0)} of ${cfg.horizonBars} bars  -  auto-exit ${hhmm(opened + cfg.horizonBars * Config.BAR_MS)}"
+                else -> "opened ${dayHhmm(opened)}  ·  tap for chart"
+            }
             T(txt, 11.sp, C.Muted, modifier = Modifier.weight(1f))
             Pill("Close", C.Red, onClick = onClose)
         }
