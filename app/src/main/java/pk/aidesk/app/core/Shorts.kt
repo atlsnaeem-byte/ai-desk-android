@@ -21,11 +21,18 @@ data class ShortCfg(
     val maxPositions: Int = 10,
     val entryWindowH: Int = 6,
     val paperStart: Double = 100.0,
+    // Pump rule: shortlist by default (it LOST 2-3% per trade in the 2026 backtest). Auto-trading it is the user's choice.
+    val pumpAuto: Boolean = false,
+    val pumpSlPct: Double = 50.0,
+    val pumpTpPct: Double = 35.0,
+    val pumpHoldDays: Int = 14,
+    val pumpCooldownDays: Int = 5,
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("enabled", enabled); put("entryDay", entryDay); put("holdDays", holdDays); put("slPct", slPct); put("tpPct", tpPct)
         put("marginPct", marginPct); put("leverage", leverage); put("maxPositions", maxPositions); put("entryWindowH", entryWindowH)
-        put("paperStart", paperStart)
+        put("paperStart", paperStart); put("pumpAuto", pumpAuto); put("pumpSlPct", pumpSlPct); put("pumpTpPct", pumpTpPct)
+        put("pumpHoldDays", pumpHoldDays); put("pumpCooldownDays", pumpCooldownDays)
     }
 
     companion object {
@@ -34,30 +41,33 @@ data class ShortCfg(
             return ShortCfg(o.optBoolean("enabled", d.enabled), o.optInt("entryDay", d.entryDay), o.optInt("holdDays", d.holdDays),
                 o.optDouble("slPct", d.slPct), o.optDouble("tpPct", d.tpPct), o.optDouble("marginPct", d.marginPct),
                 o.optInt("leverage", d.leverage), o.optInt("maxPositions", d.maxPositions), o.optInt("entryWindowH", d.entryWindowH),
-                o.optDouble("paperStart", d.paperStart))
+                o.optDouble("paperStart", d.paperStart), o.optBoolean("pumpAuto", d.pumpAuto), o.optDouble("pumpSlPct", d.pumpSlPct),
+                o.optDouble("pumpTpPct", d.pumpTpPct), o.optInt("pumpHoldDays", d.pumpHoldDays), o.optInt("pumpCooldownDays", d.pumpCooldownDays))
         }
     }
 }
 
 class ShortPos(
     val symbol: String, val entry: Double, val qty: Double, val opened: Long, val exitAt: Long, val margin: Double,
-    val sl: Double, val tp: Double, val entryFee: Double, var lastCheck: Long,
+    val sl: Double, val tp: Double, val entryFee: Double, var lastCheck: Long, val rule: String = "listing",
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("symbol", symbol); put("entry", entry); put("qty", qty); put("opened", opened); put("exitAt", exitAt); put("margin", margin)
-        put("sl", sl); put("tp", tp); put("entryFee", entryFee); put("lastCheck", lastCheck)
+        put("sl", sl); put("tp", tp); put("entryFee", entryFee); put("lastCheck", lastCheck); put("rule", rule)
     }
 
     companion object {
         fun from(o: JSONObject) = ShortPos(o.getString("symbol"), o.getDouble("entry"), o.getDouble("qty"), o.getLong("opened"),
             o.getLong("exitAt"), o.getDouble("margin"), o.getDouble("sl"), o.getDouble("tp"), o.optDouble("entryFee", 0.0),
-            o.optLong("lastCheck", o.getLong("opened")))
+            o.optLong("lastCheck", o.getLong("opened")), o.optString("rule", "listing"))
     }
 }
 
-class ShortState(var paperEquity: Double, val open: MutableMap<String, ShortPos> = linkedMapOf(), val done: MutableList<String> = mutableListOf()) {
+class ShortState(var paperEquity: Double, val open: MutableMap<String, ShortPos> = linkedMapOf(), val done: MutableList<String> = mutableListOf(),
+                 val pumpCool: MutableMap<String, Long> = linkedMapOf()) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("paperEquity", paperEquity)
+        put("pumpCool", JSONObject().also { o -> pumpCool.forEach { (k, v) -> o.put(k, v) } })
         put("open", JSONObject().also { o -> open.forEach { (k, v) -> o.put(k, v.toJson()) } })
         put("done", JSONArray(done.takeLast(2000)))
     }
@@ -68,7 +78,8 @@ class ShortState(var paperEquity: Double, val open: MutableMap<String, ShortPos>
             val op = o.optJSONObject("open")
             return ShortState(o.optDouble("paperEquity", start),
                 op?.keys()?.asSequence()?.associateWith { ShortPos.from(op.getJSONObject(it)) }?.toMutableMap() ?: linkedMapOf(),
-                o.optJSONArray("done")?.let { a -> (0 until a.length()).map { a.getString(it) }.toMutableList() } ?: mutableListOf())
+                o.optJSONArray("done")?.let { a -> (0 until a.length()).map { a.getString(it) }.toMutableList() } ?: mutableListOf(),
+                o.optJSONObject("pumpCool")?.let { pc -> pc.keys().asSequence().associateWith { pc.getLong(it) }.toMutableMap() } ?: linkedMapOf())
         }
     }
 }
@@ -190,12 +201,34 @@ class ShortHunter(private val store: Store) {
                 }
             }
         }
+        if (c.pumpAuto) {
+            try {
+                val held = if (live) api.positions().keys else emptySet()
+                for (pm in pumps(api, 25, now)) {
+                    val s = pm.symbol
+                    if (pm.status != "SIGNAL" || s in st.open || s in held) continue
+                    if (now - (st.pumpCool[s] ?: 0L) < c.pumpCooldownDays * DAY) continue
+                    if (s in store.botSymbols(mode)) continue
+                    st.pumpCool[s] = now
+                    try {
+                        openShort(mode, api, st, s, now, now + c.pumpHoldDays * DAY, c, equityOf, c.pumpSlPct, c.pumpTpPct,
+                            "pump ${pm.d1?.let { String.format(Locale.US, "%+.0f%% 1d", it) } ?: ""}".trim())?.let { ev += it }
+                    } catch (e: Exception) {
+                        store.log("ERROR", "Short hunter pump $s entry: ${(e as? BinanceException)?.msg ?: e.message}")
+                        ev += Event("error", "Short hunter: $s pump entry failed", (e as? BinanceException)?.msg ?: e.message ?: "", false, s)
+                    }
+                }
+            } catch (e: Exception) {
+                store.log("WARN", "Short hunter pump scan: ${e.message ?: e.javaClass.simpleName}")
+            }
+        }
         saveState(mode, st)
         return ev
     }
 
     private fun openShort(mode: String, api: Binance, st: ShortState, s: String, now: Long, exitAt: Long, c: ShortCfg,
-                          equityOf: () -> Pair<Double, Double>): Event? {
+                          equityOf: () -> Pair<Double, Double>, slPct: Double = c.slPct, tpPct: Double = c.tpPct,
+                          rule: String = "listing"): Event? {
         if (st.open.size >= c.maxPositions) { store.log("INFO", "Short hunter $s: skip, ${c.maxPositions} shorts already open"); return null }
         val live = mode != "paper"
         val (eq, avail) = if (live) equityOf() else st.paperEquity to st.paperEquity - st.open.values.sumOf { it.margin }
@@ -219,8 +252,8 @@ class ShortHunter(private val store: Store) {
             entry = r.optString("avgPrice").toDoubleOrNull()?.takeIf { it > 0 } ?: price
             fee = qty * entry * FEE
             try {
-                api.closeTrigger(s, "BUY", "STOP_MARKET", api.fmtPrice(s, entry * (1 + c.slPct / 100)).second)
-                api.closeTrigger(s, "BUY", "TAKE_PROFIT_MARKET", api.fmtPrice(s, entry * (1 - c.tpPct / 100)).second)
+                api.closeTrigger(s, "BUY", "STOP_MARKET", api.fmtPrice(s, entry * (1 + slPct / 100)).second)
+                api.closeTrigger(s, "BUY", "TAKE_PROFIT_MARKET", api.fmtPrice(s, entry * (1 - tpPct / 100)).second)
             } catch (e: BinanceException) {
                 store.log("ERROR", "Short hunter $s: SL/TP rejected (${e.msg}), closing for safety")
                 api.cancelAll(s)
@@ -228,9 +261,62 @@ class ShortHunter(private val store: Store) {
                 return Event("error", "Short hunter: $s closed", "Binance rejected the stop order, so the short was closed.", true, s)
             }
         }
-        st.open[s] = ShortPos(s, entry, qty, now, exitAt, margin, entry * (1 + c.slPct / 100), entry * (1 - c.tpPct / 100), fee, now)
-        store.log("INFO", "Short hunter OPEN SHORT $s qty $q @ ${Engine.fmt(entry)} (${mode.uppercase()})")
-        return Event("botopen", "Short hunter: SHORT $s", "${Engine.fmt(qty)} @ ${Engine.fmt(entry)}  -  SL +${c.slPct.toInt()}%  TP -${c.tpPct.toInt()}%  -  holds up to ${c.holdDays} days", true, s)
+        st.open[s] = ShortPos(s, entry, qty, now, exitAt, margin, entry * (1 + slPct / 100), entry * (1 - tpPct / 100), fee, now, rule)
+        store.log("INFO", "Short hunter OPEN SHORT [$rule] $s qty $q @ ${Engine.fmt(entry)} (${mode.uppercase()})")
+        val days = ((exitAt - now) / DAY).toInt()
+        return Event("botopen", "Short hunter: SHORT $s ($rule)", "${Engine.fmt(qty)} @ ${Engine.fmt(entry)}  -  SL +${slPct.toInt()}%  TP -${tpPct.toInt()}%  -  holds up to $days days", true, s)
+    }
+
+    // ------------------------------------------------------------------ manual (UI buttons)
+    /** Short a coin now with the rule that fits it (new listing -> listing SL/TP, otherwise pump SL/TP). */
+    fun openManual(mode: String, api: Binance, s: String, equityOf: () -> Pair<Double, Double>): String {
+        val c = cfg()
+        val st = state(mode)
+        if (s in st.open) throw UserError("$s is already shorted.")
+        if (mode != "paper" && s in api.positions()) throw UserError("The account already holds a $s position.")
+        val now = api.nowMs()
+        val info = coins(api)[s] ?: throw UserError("$s is not a tradable USDT perpetual.")
+        val day0 = info.getLong("onboardDate") / DAY * DAY
+        val isListing = (now - day0) / DAY <= c.entryDay + c.holdDays
+        val ev = if (isListing)
+            openShort(mode, api, st, s, now, maxOf(now + DAY, day0 + (c.entryDay + c.holdDays + 1) * DAY), c, equityOf, rule = "manual listing")
+        else
+            openShort(mode, api, st, s, now, now + c.pumpHoldDays * DAY, c, equityOf, c.pumpSlPct, c.pumpTpPct, "manual pump")
+        if (!isListing) st.pumpCool[s] = now
+        st.done += s
+        saveState(mode, st)
+        return when (ev?.kind) {
+            "botopen" -> ev.title + "\n" + ev.text
+            null -> throw UserError("Not opened: max ${c.maxPositions} shorts or not enough free margin (see Logs).")
+            else -> throw UserError(ev.text)
+        }
+    }
+
+    /** Close an open short now at market. */
+    fun closeManual(mode: String, api: Binance, s: String): String {
+        val st = state(mode)
+        val p = st.open[s] ?: throw UserError("No open short on $s.")
+        val ev = ArrayList<Event>()
+        val now = api.nowMs()
+        if (mode == "paper") {
+            val px = api.markPrice(s) * (1 + SLIP / 100)
+            val gross = (p.entry - px) * p.qty
+            val fee = px * p.qty * FEE
+            val fund = api.fundingSum(s, p.opened, now) * p.entry * p.qty
+            st.paperEquity += gross - fee + fund
+            record(mode, st, p, px, "closed by you", gross - fee - p.entryFee + fund, now, ev)
+        } else {
+            api.cancelAll(s)
+            val pos = api.positions()[s]
+            if (pos != null) {
+                val amt = kotlin.math.abs(pos.getString("positionAmt").toDouble())
+                api.marketOrder(s, "BUY", api.fmtQty(s, amt).second, reduceOnly = true)
+                Thread.sleep(1500)
+            }
+            record(mode, st, p, api.markPrice(s), "closed by you", api.incomeSince(s, p.opened - 1000), now, ev)
+        }
+        saveState(mode, st)
+        return ev.firstOrNull()?.let { it.title + "  " + it.text } ?: "Closed $s"
     }
 
     private fun record(mode: String, st: ShortState, p: ShortPos, exit: Double, reason: String, pnl: Double, now: Long, ev: MutableList<Event>) {

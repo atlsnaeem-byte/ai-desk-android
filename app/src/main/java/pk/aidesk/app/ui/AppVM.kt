@@ -80,6 +80,7 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         // Dispatchers.Main (not .immediate): run after the constructor, when all properties below exist.
         viewModelScope.launch(Dispatchers.Main) { TraderService.ticks.collect { reload(); if (journalView.value == "signals") loadSigLog() } }
         viewModelScope.launch(Dispatchers.Main) { TraderService.copyTicks.collect { if (tab.value == "bots" && botTab.value == "copy") loadCopy(false) } }
+        viewModelScope.launch(Dispatchers.Main) { TraderService.manualTicks.collect { if (tab.value == "trade") loadManual() } }
         loadJournal()
     }
 
@@ -261,6 +262,122 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     fun loadSigLog() = viewModelScope.launch { sigLog.value = withContext(Dispatchers.IO) { store.signalLog() }.sortedByDescending { it.since } }
 
     fun clearSigLog() { store.clearSignalLog(); sigLog.value = emptyList() }
+
+    // ------------------------------------------------------------------ bot buttons (short hunter / copy)
+    fun shortOpen(symbol: String) = act {
+        val r = withContext(Dispatchers.IO) {
+            val c = engine.cfg(); val api = engine.client(c); api.syncTime()
+            shortHunter.openManual(c.mode, api, symbol) { api.equity() }
+        }
+        loadShorts(false); r
+    }
+
+    fun shortClose(symbol: String) = act {
+        val r = withContext(Dispatchers.IO) {
+            val c = engine.cfg(); val api = engine.client(c); api.syncTime()
+            shortHunter.closeManual(c.mode, api, symbol)
+        }
+        loadShorts(false); r
+    }
+
+    fun copyClose(ck: String) = act {
+        val r = withContext(Dispatchers.IO) {
+            val c = engine.cfg(); val api = engine.client(c); api.syncTime()
+            copyBot.closeManual(c.mode, api, pub, ck)
+        }
+        loadCopy(false); r
+    }
+
+    // ------------------------------------------------------------------ trade tab (manual trading)
+    val desk = pk.aidesk.app.core.ManualDesk(store)
+    val coins = MutableStateFlow<List<pk.aidesk.app.core.CoinRow>>(emptyList())
+    val coinsErr = MutableStateFlow<String?>(null)
+    val tradeSym = MutableStateFlow<String?>(null)
+    val tradeTf = MutableStateFlow("15m")
+    val analysis = MutableStateFlow<pk.aidesk.app.core.Advisor.Analysis?>(null)
+    val analysisErr = MutableStateFlow<String?>(null)
+    val analysisLoading = MutableStateFlow(false)
+    val manual = MutableStateFlow<List<pk.aidesk.app.core.ManualPlan>>(emptyList())
+    val quote = MutableStateFlow<pk.aidesk.app.core.Quote?>(null)
+    val quoteErr = MutableStateFlow<String?>(null)
+    private var anaJob: Job? = null
+
+    fun loadCoins() = viewModelScope.launch {
+        try {
+            coins.value = withContext(Dispatchers.IO) { pub.usdtPerps() }
+            coinsErr.value = null
+        } catch (e: Exception) {
+            coinsErr.value = e.message ?: e.javaClass.simpleName
+        }
+    }
+
+    fun openCoin(symbol: String) {
+        tradeSym.value = symbol
+        analysis.value = null
+        quote.value = null
+        startAnalysis()
+    }
+
+    fun closeCoin() {
+        anaJob?.cancel()
+        tradeSym.value = null
+        analysis.value = null
+    }
+
+    fun setTf(tf: String) {
+        if (tf == tradeTf.value) return
+        tradeTf.value = tf
+        analysis.value = null
+        startAnalysis()
+    }
+
+    /** Re-analyse the open coin every 20 s while the Trade screen shows it. */
+    fun startAnalysis() {
+        anaJob?.cancel()
+        anaJob = viewModelScope.launch {
+            while (isActive) {
+                val s = tradeSym.value ?: break
+                val tf = tradeTf.value
+                analysisLoading.value = true
+                try {
+                    val a = withContext(Dispatchers.IO) { pk.aidesk.app.core.Advisor.load(pub, s, tf) }
+                    if (s == tradeSym.value && tf == tradeTf.value) { analysis.value = a; analysisErr.value = null }
+                } catch (e: Exception) {
+                    analysisErr.value = "Could not load $s: ${e.message ?: e.javaClass.simpleName}"
+                } finally {
+                    analysisLoading.value = false
+                }
+                delay(20_000)
+            }
+        }
+    }
+
+    fun stopAnalysis() { anaJob?.cancel(); anaJob = null }
+
+    fun loadManual() = viewModelScope.launch {
+        manual.value = withContext(Dispatchers.IO) { desk.plans(config.value.mode) }.sortedByDescending { it.created }
+    }
+
+    fun quoteTicket(t: pk.aidesk.app.core.Ticket) = viewModelScope.launch {
+        try {
+            quote.value = withContext(Dispatchers.IO) { val c = engine.cfg(); desk.quote(c, engine.client(c), t) }
+            quoteErr.value = null
+        } catch (e: Exception) {
+            quote.value = null
+            quoteErr.value = e.message ?: e.javaClass.simpleName
+        }
+    }
+
+    fun placeManual(t: pk.aidesk.app.core.Ticket, done: () -> Unit) = act {
+        val r = withContext(Dispatchers.IO) { val c = engine.cfg(); val api = engine.client(c); api.syncTime(); desk.place(c, api, t) }
+        TraderService.start(getApplication(), TraderService.ACTION_MANUAL)
+        loadManual(); done(); r
+    }
+
+    fun cancelManual(id: String) = act {
+        val r = withContext(Dispatchers.IO) { val c = engine.cfg(); val api = engine.client(c); api.syncTime(); desk.cancel(c, api, id) }
+        loadManual(); r
+    }
 
     fun finishSetup() {
         store.setupDone = true

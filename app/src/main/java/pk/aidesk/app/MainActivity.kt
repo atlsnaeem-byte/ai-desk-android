@@ -121,11 +121,13 @@ private fun MainNav(vm: AppVM, act: MainActivity) {
     val detail by vm.detail.collectAsState()
     val take by vm.take.collectAsState()
     val page by vm.page.collectAsState()
+    val tradeSym by vm.tradeSym.collectAsState()
 
-    BackHandler(enabled = take != null || detail != null || page != null) {
+    BackHandler(enabled = take != null || detail != null || page != null || (tab == "trade" && tradeSym != null)) {
         when {
             take != null -> vm.take.value = null
             detail != null -> vm.detail.value = null
+            tab == "trade" && tradeSym != null -> vm.closeCoin()
             else -> vm.page.value = null
         }
     }
@@ -133,6 +135,7 @@ private fun MainNav(vm: AppVM, act: MainActivity) {
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when (tab) {
+                    "trade" -> pk.aidesk.app.ui.TradeScreen(vm, act)
                     "positions" -> PositionsScreen(vm)
                     "journal" -> JournalScreen(vm)
                     "bots" -> BotsScreen(vm, act)
@@ -155,12 +158,13 @@ private fun MainNav(vm: AppVM, act: MainActivity) {
 @Composable
 private fun BottomNav(tab: String, onTab: (String) -> Unit) {
     Row(Modifier.fillMaxWidth().background(C.Panel).padding(vertical = 6.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-        for ((k, label) in listOf("signals" to "Signals", "positions" to "Positions", "bots" to "Bots", "journal" to "Journal", "settings" to "Settings")) {
+        for ((k, label) in listOf("signals" to "Signals", "trade" to "Trade", "positions" to "Positions", "bots" to "Bots",
+                "journal" to "Journal", "settings" to "Settings")) {
             val on = k == tab
-            Column(Modifier.clip(RoundedCornerShape(10.dp)).clickable { onTab(k) }.padding(horizontal = 8.dp, vertical = 4.dp),
+            Column(Modifier.clip(RoundedCornerShape(10.dp)).clickable { onTab(k) }.padding(horizontal = 4.dp, vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(Modifier.clip(RoundedCornerShape(50)).background(if (on) androidx.compose.ui.graphics.Color(0xFF1D3A5C) else C.Panel)
-                    .padding(horizontal = 16.dp, vertical = 5.dp)) {
+                    .padding(horizontal = 12.dp, vertical = 5.dp)) {
                     Box(Modifier.size(7.dp).clip(CircleShape).background(if (on) C.Txt else C.Muted))
                 }
                 T(label, 11.sp, if (on) C.Txt else C.Muted, if (on) FontWeight.SemiBold else FontWeight.Normal)

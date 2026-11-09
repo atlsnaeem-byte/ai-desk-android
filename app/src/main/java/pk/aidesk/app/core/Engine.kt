@@ -124,7 +124,7 @@ class Engine(context: Context) {
         val st = store.state(c.mode, c.paperStartEquity)
         var foreign = emptyList<String>()
         // Coins held by the Short Hunter / Copy bots: not counted as "external" slots, never traded by the AI.
-        val botHeld = if (trading(c)) store.botSymbols(c.mode).keys else emptySet()
+        val botHeld = if (trading(c)) store.botSymbols(c.mode).keys else store.botSymbols(c.mode).filterValues { it == "manual" }.keys
         if (trading(c)) {
             prepare(c, api)
             foreign = manageLive(c, api, st, events).filter { it !in botHeld }
@@ -427,6 +427,7 @@ class Engine(context: Context) {
         val c = cfg()
         val api = client(c)
         api.syncTime()
+        ManualDesk(store).closeSymbol(c, api, symbol)?.let { return@synchronized it }   // trade opened from the Trade tab
         val st = store.state(c.mode, c.paperStartEquity)
         val msg = if (trading(c)) {
             val p = api.positions()[symbol] ?: throw UserError("No open $symbol position on Binance.")
@@ -445,7 +446,8 @@ class Engine(context: Context) {
         val api = client(c)
         val st = store.state(c.mode, c.paperStartEquity)
         if (!trading(c)) {
-            val marks = if (st.open.isNotEmpty()) runCatching { api.markPrices() }.getOrDefault(emptyMap()) else emptyMap()
+            val man = ManualDesk(store).paperOpen(c.mode)
+            val marks = if (st.open.isNotEmpty() || man.isNotEmpty()) runCatching { api.markPrices() }.getOrDefault(emptyMap()) else emptyMap()
             var upnl = 0.0
             val ps = st.open.values.map { tr ->
                 val dr = if (tr.side == "LONG") 1 else -1
@@ -453,17 +455,26 @@ class Engine(context: Context) {
                 val u = if (mk != null) tr.qty * dr * (mk - tr.entry) else 0.0
                 upnl += u
                 Position(tr.symbol, tr.side, tr.qty, tr.entry, mk, u, tr.sl, tr.tp, tr.openedMs, true, tr.origin)
+            } + man.map { p ->
+                val mk = marks[p.symbol]
+                val fill = p.fill ?: p.entry
+                val u = if (mk != null) p.qty * p.dir * (mk - fill) else 0.0
+                upnl += u
+                Position(p.symbol, p.side, p.qty, fill, mk, u, p.sl, p.tp, p.filledMs, true, "manual")
             }
             return Account(c.mode, st.equity + upnl, st.equity, upnl, ps, st.dayStart, st.halted)
         }
         val acc = api.account()
         val owners = store.botSymbols(c.mode)
+        val man = ManualDesk(store).active(c.mode).filter { it.status == "open" }.associateBy { it.symbol }
         val ps = api.positions().map { (s, p) ->
             val amt = p.getString("positionAmt").toDouble()
             val tr = st.open[s]
+            val mp = man[s]
             Position(s, if (amt > 0) "LONG" else "SHORT", abs(amt), p.getString("entryPrice").toDouble(),
                 p.optString("markPrice").toDoubleOrNull(), p.optString("unRealizedProfit").toDoubleOrNull() ?: 0.0,
-                tr?.sl, tr?.tp, tr?.openedMs, tr != null, tr?.origin ?: owners[s] ?: "external")
+                tr?.sl ?: mp?.sl, tr?.tp ?: mp?.tp, tr?.openedMs ?: mp?.filledMs, tr != null || mp != null,
+                tr?.origin ?: owners[s] ?: "external")
         }
         return Account(c.mode, acc.getString("totalMarginBalance").toDouble(), acc.getString("availableBalance").toDouble(),
             acc.getString("totalUnrealizedProfit").toDouble(), ps, st.dayStart, st.halted)

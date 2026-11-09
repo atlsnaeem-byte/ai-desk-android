@@ -189,6 +189,7 @@ class CopyBot(private val store: Store) {
         private const val FEE = 0.0005
         private const val SLIP = 0.05
         private const val DAY = 86_400_000L
+        private val STEP_LOCK = Any()
     }
 
     private val baseline = HashMap<String, MutableSet<String>>()
@@ -212,8 +213,21 @@ class CopyBot(private val store: Store) {
 
     private fun log(msg: String) = store.log("INFO", "Copy: $msg")
 
-    @Synchronized
-    fun step(mode: String, api: Binance, pub: Binance): List<Event> {
+    /** One poll. Shares a lock with closeManual (the UI and the background service use different instances). */
+    fun step(mode: String, api: Binance, pub: Binance): List<Event> = synchronized(STEP_LOCK) { stepLocked(mode, api, pub) }
+
+    /** Close one copy now at market (button in the Copy trade screen). ck = key in CopyState.copies. */
+    fun closeManual(mode: String, api: Binance, pub: Binance, ck: String): String = synchronized(STEP_LOCK) {
+        val c = cfg()
+        val st = state(mode)
+        val cp = st.copies[ck] ?: throw UserError("That copy is already closed.")
+        val ev = ArrayList<Event>()
+        reduce(mode, c, st, api, pub, ck, cp, cp.qty, "closed by you", api.nowMs(), ev)
+        saveState(mode, st)
+        ev.firstOrNull()?.let { it.title + "  " + it.text } ?: "Closed ${cp.symbol}"
+    }
+
+    private fun stepLocked(mode: String, api: Binance, pub: Binance): List<Event> {
         val c = cfg()
         val st = state(mode)
         val ev = mutableListOf<Event>()

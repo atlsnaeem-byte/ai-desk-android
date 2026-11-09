@@ -260,6 +260,11 @@ class Store(ctx: Context) {
     fun botSymbols(mode: String): Map<String, String> {
         val out = linkedMapOf<String, String>()
         readObj("shorts_state_$mode.json")?.optJSONObject("open")?.keys()?.forEach { out[it] = "short hunter" }
+        readArr("manual_$mode.json")?.let { a ->
+            for (i in 0 until a.length()) a.optJSONObject(i)?.let { o ->
+                if (o.optString("status") in setOf("pending", "open")) out[o.getString("symbol")] = "manual"
+            }
+        }
         readObj("copy_state_$mode.json")?.optJSONObject("copies")?.let { c ->
             c.keys().forEach { k -> c.optJSONObject(k)?.optString("symbol")?.takeIf { it.isNotEmpty() }?.let { out[it] = "copy" } }
         }

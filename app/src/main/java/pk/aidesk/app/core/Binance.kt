@@ -297,4 +297,105 @@ class Binance(private val key: String? = null, private val secret: String? = nul
             runCatching { signed("DELETE", p, mapOf("symbol" to symbol)) }
         }
     }
+
+    // ------------------------------------------------------- manual trading
+    /** Candles of any interval INCLUDING the one still forming (last element). */
+    fun candles(symbol: String, interval: String, limit: Int): Candles {
+        val a = get("/fapi/v1/klines", mapOf("symbol" to symbol, "interval" to interval, "limit" to limit.coerceIn(2, 1500))) as JSONArray
+        val rows = (0 until a.length()).map { a.getJSONArray(it) }
+        return Candles(
+            LongArray(rows.size) { rows[it].getLong(0) },
+            DoubleArray(rows.size) { rows[it].getString(1).toDouble() },
+            DoubleArray(rows.size) { rows[it].getString(2).toDouble() },
+            DoubleArray(rows.size) { rows[it].getString(3).toDouble() },
+            DoubleArray(rows.size) { rows[it].getString(4).toDouble() },
+            DoubleArray(rows.size) { rows[it].getString(5).toDouble() },
+            DoubleArray(rows.size) { rows[it].getString(9).toDouble() },
+            LongArray(rows.size) { rows[it].getLong(6) },
+        )
+    }
+
+    /** GTC limit order (entry or reduce-only exit). */
+    fun limitOrder(symbol: String, side: String, qty: String, price: String, reduceOnly: Boolean = false) =
+        signed("POST", "/fapi/v1/order", mapOf("symbol" to symbol, "side" to side, "type" to "LIMIT", "timeInForce" to "GTC",
+            "quantity" to qty, "price" to price, "reduceOnly" to (if (reduceOnly) "true" else null), "newOrderRespType" to "RESULT")) as JSONObject
+
+    /** Breakout entry: STOP_MARKET that OPENS a position when the mark price crosses `trigger` (Algo endpoint, legacy fallback). */
+    fun stopEntry(symbol: String, side: String, qty: String, trigger: String): Any {
+        val b = mapOf("symbol" to symbol, "side" to side, "type" to "STOP_MARKET", "quantity" to qty, "workingType" to "MARK_PRICE")
+        return try {
+            signed("POST", "/fapi/v1/algoOrder", b + mapOf("algoType" to "CONDITIONAL", "triggerPrice" to trigger))
+        } catch (e1: BinanceException) {
+            try {
+                signed("POST", "/fapi/v1/order", b + mapOf("stopPrice" to trigger))
+            } catch (e2: BinanceException) {
+                throw BinanceException(e2.status, e2.code, "algo: ${e1.msg} | legacy: ${e2.msg}")
+            }
+        }
+    }
+
+    private fun arr(x: Any?): List<JSONObject> = when (x) {
+        is JSONArray -> (0 until x.length()).map { x.getJSONObject(it) }
+        is JSONObject -> (x.optJSONArray("orders") ?: x.optJSONArray("rows") ?: JSONArray()).let { a -> (0 until a.length()).map { a.getJSONObject(it) } }
+        else -> emptyList()
+    }
+
+    /** All open orders for a symbol: normal + algo (conditional) orders. */
+    fun openOrdersAll(symbol: String): List<JSONObject> {
+        val out = ArrayList<JSONObject>()
+        out += arr(runCatching { signed("GET", "/fapi/v1/openOrders", mapOf("symbol" to symbol)) }.getOrNull())
+        out += arr(runCatching { signed("GET", "/fapi/v1/openAlgoOrders", mapOf("symbol" to symbol)) }.getOrNull())
+        return out
+    }
+
+    /** Which protective orders exist for a symbol: "SL" (STOP_MARKET close) and/or "TP" (TAKE_PROFIT_MARKET close). */
+    fun protections(symbol: String): Set<String> {
+        val s = HashSet<String>()
+        for (o in openOrdersAll(symbol)) {
+            val t = (o.optString("orderType").ifEmpty { o.optString("type") }).uppercase()
+            val closing = o.optBoolean("closePosition") || o.optString("closePosition") == "true" || o.optBoolean("reduceOnly")
+            if (!closing) continue
+            if (t.startsWith("STOP")) s += "SL"
+            if (t.startsWith("TAKE_PROFIT")) s += "TP"
+        }
+        return s
+    }
+
+    /** Is there still an entry (non-closing) order waiting for this symbol? */
+    fun hasEntryOrder(symbol: String): Boolean = openOrdersAll(symbol).any { o ->
+        !(o.optBoolean("closePosition") || o.optString("closePosition") == "true" || o.optBoolean("reduceOnly"))
+    }
+
+    /** Positioning data (public "futures/data" endpoints, 1h period). Missing values are null. */
+    fun positioning(symbol: String): Map<String, Double?> {
+        fun last(path: String, field: String, limit: Int = 1): List<Double> = runCatching {
+            val a = get(path, mapOf("symbol" to symbol, "period" to "1h", "limit" to limit)) as JSONArray
+            (0 until a.length()).map { a.getJSONObject(it).getString(field).toDouble() }
+        }.getOrDefault(emptyList())
+        val oi = last("/futures/data/openInterestHist", "sumOpenInterest", 25)
+        val oiUsd = last("/futures/data/openInterestHist", "sumOpenInterestValue", 1)
+        val fr = runCatching { (get("/fapi/v1/premiumIndex", mapOf("symbol" to symbol)) as JSONObject).getString("lastFundingRate").toDouble() * 100 }.getOrNull()
+        return mapOf(
+            "funding_pct" to fr,
+            "oi_usd" to oiUsd.lastOrNull(),
+            "oi_chg_24h_pct" to if (oi.size >= 2 && oi.first() > 0) (oi.last() / oi.first() - 1) * 100 else null,
+            "ls_accounts" to last("/futures/data/globalLongShortAccountRatio", "longShortRatio").lastOrNull(),
+            "ls_top" to last("/futures/data/topLongShortPositionRatio", "longShortRatio").lastOrNull(),
+            "taker_bs" to last("/futures/data/takerlongshortRatio", "buySellRatio").lastOrNull(),
+        )
+    }
+
+    /** USDT perpetual coins that are trading, with 24h stats, sorted by volume. */
+    fun usdtPerps(): List<CoinRow> {
+        val info = exchangeInfo(fresh = true).filterValues {
+            it.optString("quoteAsset") == "USDT" && it.optString("contractType") == "PERPETUAL" && it.optString("status") == "TRADING"
+        }
+        val t = ticker24h()
+        return (0 until t.length()).map { t.getJSONObject(it) }.filter { it.getString("symbol") in info }.map {
+            CoinRow(it.getString("symbol"), it.getString("lastPrice").toDouble(), it.getString("priceChangePercent").toDouble(),
+                it.getString("quoteVolume").toDouble())
+        }.sortedByDescending { it.volume }
+    }
 }
+
+class CoinRow(val symbol: String, val price: Double, val changePct: Double, val volume: Double)

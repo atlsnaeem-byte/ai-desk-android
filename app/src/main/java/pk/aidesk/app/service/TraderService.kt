@@ -46,6 +46,9 @@ class TraderService : Service() {
         /** Bumped after every copy-trading poll. */
         val copyTicks = MutableStateFlow(0L)
         const val ACTION_COPY = "pk.aidesk.COPY"
+        const val ACTION_MANUAL = "pk.aidesk.MANUAL"
+        /** Bumped after every manual-order watch. */
+        val manualTicks = MutableStateFlow(0L)
         val running = MutableStateFlow(false)
         @Volatile var instance: TraderService? = null
 
@@ -88,13 +91,55 @@ class TraderService : Service() {
             ACTION_REFRESH -> Notifier.updateStatus(this, engine)
             ACTION_CYCLE -> runCycle()
             ACTION_COPY -> { copyBot.resetBaseline(); ensureCopyLoop() }
+            ACTION_MANUAL -> ensureManualLoop()
             else -> { // start / restart: catch up if the last scan is from an earlier bar
                 val bar = System.currentTimeMillis() / Config.BAR_MS * Config.BAR_MS
                 if (engine.store.lastCycle < bar + 8_000) runCycle() else schedule()
             }
         }
         ensureCopyLoop()
+        ensureManualLoop()
         return START_STICKY
+    }
+
+    // ------------------------------------------------------------------ manual orders (Trade tab)
+    private var manualJob: Job? = null
+    private var manualWl: PowerManager.WakeLock? = null
+
+    /** Every 10 s while manual orders are active: fills, missing SL/TP, expiry, closes. Stops when there is nothing to watch. */
+    fun ensureManualLoop() {
+        if (manualJob?.isActive == true) return
+        manualJob = scope.launch {
+            val desk = pk.aidesk.app.core.ManualDesk(engine.store)
+            var idle = 0
+            var lastErr: String? = null
+            while (isActive) {
+                val c = engine.cfg()
+                if (desk.active(c.mode).isEmpty()) {
+                    manualWl?.let { if (it.isHeld) it.release() }
+                    if (++idle > 3) break
+                    delay(20_000); continue
+                }
+                idle = 0
+                val wl = manualWl ?: (getSystemService(POWER_SERVICE) as PowerManager)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aidesk:manual").apply { setReferenceCounted(false) }.also { manualWl = it }
+                wl.acquire(5 * 60_000L)
+                try {
+                    val api = engine.client(c)
+                    val ev = desk.watch(c, api)
+                    ev.forEach { Notifier.event(this@TraderService, engine, it) }
+                    if (ev.isNotEmpty()) ticks.value = System.currentTimeMillis()
+                    manualTicks.value = System.currentTimeMillis()
+                    lastErr = null
+                } catch (e: Exception) {
+                    val m = (e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName
+                    if (m != lastErr) engine.store.log("ERROR", "Manual orders: $m")
+                    lastErr = m
+                }
+                delay(10_000)
+            }
+            manualWl?.let { if (it.isHeld) it.release() }
+        }
     }
 
     fun runCycle() {
@@ -141,7 +186,7 @@ class TraderService : Service() {
             val api = engine.client(c)
             api.syncTime()
             val sh = ShortHunter(engine.store)
-            if (!sh.cfg().enabled && sh.state(c.mode).open.isEmpty()) return
+            if (!sh.cfg().enabled && !sh.cfg().pumpAuto && sh.state(c.mode).open.isEmpty()) return
             sh.step(c.mode, api) { api.equity() }.forEach { Notifier.event(this, engine, it) }
         } catch (e: Exception) {
             engine.store.log("ERROR", "Short hunter: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")
@@ -219,6 +264,7 @@ class TraderService : Service() {
 
     override fun onDestroy() {
         copyWl?.let { if (it.isHeld) it.release() }
+        manualWl?.let { if (it.isHeld) it.release() }
         instance = null
         running.value = false
         scope.cancel()

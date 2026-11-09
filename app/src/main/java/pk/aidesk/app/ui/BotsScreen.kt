@@ -92,6 +92,12 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
         item {
             EnableRow("Auto-short new listings", if (c.enabled) "Shorts every new coin on day ${c.entryDay} (${mode.uppercase()})" else "Off: shortlist only",
                 c.enabled, mode, act) { vm.saveShortCfg(c.copy(enabled = it)); vm.toast.value = if (it) "Short hunter on (${mode.uppercase()})" else "Short hunter off. Open shorts keep their SL/TP." }
+            Gap(6.dp)
+            EnableRow("Auto-short pump signals", if (c.pumpAuto) "Shorts coins up +50% in a day / +100% in 3 days · SL +${c.pumpSlPct.toInt()}% TP −${c.pumpTpPct.toInt()}% (${mode.uppercase()})"
+                else "Off · this rule lost 2–3% per trade in the 2026 backtest", c.pumpAuto, mode, act) {
+                vm.saveShortCfg(c.copy(pumpAuto = it))
+                vm.toast.value = if (it) "Pump shorts on (${mode.uppercase()}): checked every 15 min" else "Pump shorts off"
+            }
             Gap(8.dp)
             val st = v?.state; val jr = v?.journal ?: emptyList()
             val pnl = jr.sumOf { it.pnl }
@@ -118,6 +124,11 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
                     Pill(l.status, when (l.status) { "SHORT NOW" -> C.Red; "WAIT" -> C.Amber; else -> C.Muted }, filled = l.status == "SHORT NOW")
                 }
                 T("Listed ${dayHhmm(l.listed)} · day ${l.day} · short at ${dayHhmm(l.entryTime)} · ${l.note}", 11.sp, C.Muted)
+                val isOpen = v?.state?.open?.containsKey(l.symbol) == true
+                if (l.status != "WAIT" && !isOpen) {
+                    Gap(6.dp)
+                    ShortButton(vm, act, l.symbol, mode, if (l.status == "SHORT NOW") "Open short now" else "Open short anyway (late)")
+                }
             }
             Gap(6.dp)
         }
@@ -128,11 +139,23 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
             Card(border = C.Border) {
                 Row { T(p.symbol, 14.sp, C.Txt, FontWeight.Bold); HGap(8.dp); Pill("SHORT", C.Red, filled = true); Box(Modifier.weight(1f)); T("${f2(p.margin)} USDT", 12.sp, C.Muted) }
                 T("Entry ${px(p.entry)} · SL ${px(p.sl)} · TP ${px(p.tp)}", 11.sp, C.Muted, mono = true)
-                T("Opened ${dayHhmm(p.opened)} · time exit ${dayHhmm(p.exitAt)}", 11.sp, C.Muted)
+                T("Opened ${dayHhmm(p.opened)} · ${p.rule} · time exit ${dayHhmm(p.exitAt)}", 11.sp, C.Muted)
+                var ask by remember { mutableStateOf(false) }
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                    Box(Modifier.weight(1f))
+                    T("Close now", 13.sp, C.Red, FontWeight.Bold, modifier = Modifier.clickable { ask = true })
+                }
+                if (ask) AlertDialog(onDismissRequest = { ask = false },
+                    confirmButton = { TextButton({ ask = false
+                        if (mode == "live") act.confirmUser("Close LIVE short ${p.symbol}") { vm.shortClose(p.symbol) } else vm.shortClose(p.symbol)
+                    }) { Text("Close at market", color = C.Red) } },
+                    dismissButton = { TextButton({ ask = false }) { Text("Keep") } },
+                    title = { Text("Close ${p.symbol} short?") }, text = { Text("Buys back the short at market and removes its SL/TP.") },
+                    containerColor = C.Panel)
             }
             Gap(6.dp)
         }
-        item { SectionTitle("Pumped coins (watch only, not traded)") }
+        item { SectionTitle(if (c.pumpAuto) "Pumped coins (auto-shorted on SIGNAL)" else "Pumped coins (tap Short to open)") }
         val pumps = v?.pumps ?: emptyList()
         if (pumps.isEmpty()) item { T("-", 13.sp, C.Muted) }
         for (p in pumps) item(key = "p" + p.symbol) {
@@ -144,9 +167,14 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
                 T(String.format(Locale.US, "%+.3f%%", p.fundingPct), 11.sp, if (p.fundingPct < 0) C.Red else C.Muted, modifier = Modifier.weight(0.9f))
                 if (p.status != "-") Pill(p.status, if (p.status == "SIGNAL") C.Amber else C.Muted)
             }
+            val isOpen = v?.state?.open?.containsKey(p.symbol) == true
+            if (p.status != "-" && !isOpen) Row(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+                Box(Modifier.weight(1f)); ShortButton(vm, act, p.symbol, mode, "Short ${p.symbol.removeSuffix("USDT")}", small = true)
+            }
         }
         item {
-            T("Negative funding = shorts pay longs. SIGNAL = pumped +50% in a day or +100% in 3 days. The bot does not trade pumps: that rule lost 2–3% per trade in 2026.",
+            T("Negative funding = shorts pay longs. SIGNAL = pumped +50% in a day or +100% in 3 days (and listed 30+ days). " +
+                "Pump shorts use SL +${c.pumpSlPct.toInt()}%, TP −${c.pumpTpPct.toInt()}%, ${c.pumpHoldDays}-day hold. Warning: this rule lost 2–3% per trade in the 2026 backtest, with single trades down 70%+.",
                 11.sp, C.Dim)
             SectionTitle("Closed shorts")
         }
@@ -186,6 +214,26 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
                 "(about 1 in 3 trades) or in an alt-coin season. New listings slowed in late 2026, so expect few trades. Past results are not a promise.", 12.sp, C.Muted)
             Gap(24.dp)
         }
+    }
+}
+
+@Composable
+private fun ShortButton(vm: AppVM, act: MainActivity, symbol: String, mode: String, label: String, small: Boolean = false) {
+    var ask by remember { mutableStateOf(false) }
+    if (small) T(label, 13.sp, C.Red, FontWeight.Bold, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(C.RedBg)
+        .clickable { ask = true }.padding(horizontal = 12.dp, vertical = 6.dp))
+    else Btn(label, C.Red, height = 40.dp) { ask = true }
+    if (ask) {
+        val c = vm.shortHunter.cfg()
+        AlertDialog(onDismissRequest = { ask = false },
+            confirmButton = { TextButton({ ask = false
+                if (mode == "live") act.confirmUser("Open LIVE short $symbol") { vm.shortOpen(symbol) } else vm.shortOpen(symbol)
+            }) { Text("Open short", color = C.Red) } },
+            dismissButton = { TextButton({ ask = false }) { Text("Cancel") } },
+            title = { Text("Short $symbol (${mode.uppercase()})?") },
+            text = { Text("Market sell, ${c.marginPct.toInt()}% of equity as margin × ${c.leverage}x. New listings: SL +${c.slPct.toInt()}% / TP −${c.tpPct.toInt()}%. " +
+                "Other coins: SL +${c.pumpSlPct.toInt()}% / TP −${c.pumpTpPct.toInt()}%. Stop and target are placed on Binance.") },
+            containerColor = C.Panel)
     }
 }
 
@@ -281,6 +329,21 @@ private fun CopyPane(vm: AppVM, act: MainActivity) {
                 T("From ${cp.leader} · ${dayHhmm(cp.opened)}", 11.sp, C.Muted)
                 T("Leader ${px(cp.leaderEntry)} · ours ${px(cp.entry)}" + (cp.slipPct?.let { " (${String.format(Locale.US, "%+.2f", it)}%)" } ?: "") +
                     " · ${f2(cp.qty * cp.entry)} USDT", 11.sp, C.Muted, mono = true)
+                var ask by remember { mutableStateOf(false) }
+                Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    T("Closes by itself when ${cp.leader} closes", 10.sp, C.Dim, modifier = Modifier.weight(1f))
+                    T("Close now", 13.sp, C.Red, FontWeight.Bold, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(C.RedBg)
+                        .clickable { ask = true }.padding(horizontal = 12.dp, vertical = 6.dp))
+                }
+                if (ask) AlertDialog(onDismissRequest = { ask = false },
+                    confirmButton = { TextButton({ ask = false
+                        val ck = cp.leaderId + "|" + cp.key
+                        if (mode == "live") act.confirmUser("Close LIVE copy ${cp.symbol}") { vm.copyClose(ck) } else vm.copyClose(ck)
+                    }) { Text("Close at market", color = C.Red) } },
+                    dismissButton = { TextButton({ ask = false }) { Text("Keep") } },
+                    title = { Text("Close ${cp.symbol} ${cp.side}?") },
+                    text = { Text("Closes your copy at market now. The leader's position is not affected, and the bot will not re-open this trade.") },
+                    containerColor = C.Panel)
             }
             Gap(6.dp)
         }
