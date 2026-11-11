@@ -40,6 +40,7 @@ object Advisor {
         val scan: Patterns.Result, val ema20: DoubleArray, val ema50: DoubleArray,
         val trendHigher: Int, val trendLocal: Int, val btcTrend: Int?, val positioning: Map<String, Double?>,
         val plans: List<Plan>, val summary: List<String>, val time: Long, val conf: Confluence.Setup? = null,
+        val supports: List<Double> = emptyList(), val resistances: List<Double> = emptyList(),
     ) {
         val best: Plan? get() = plans.firstOrNull()
         val atr: Double get() = scan.atr.lastOrNull() ?: 0.0
@@ -202,8 +203,13 @@ object Advisor {
             plans[0].score >= 1 -> "Verdict: only weak setups. Small size or wait."
             else -> "Verdict: setups fight the trend. Avoid."
         }
+        // horizontal support / resistance: 2+ swing points within 0.5 ATR over the last 200 candles (same as Confluence)
+        val sr = Confluence.srLevels(Patterns.rawPivots(closed.high, closed.low, Confluence.K).filter { it.idx >= last - 200 }.map { it.price }, a)
+        val supports = sr.filter { it < price }.sortedDescending().take(3)
+        val resistances = sr.filter { it > price }.sorted().take(3)
+        sum.add(sum.size - 1, "Support ${supports.joinToString(" / ") { f(it) }.ifEmpty { "-" }} · resistance ${resistances.joinToString(" / ") { f(it) }.ifEmpty { "-" }}")
         return Analysis(symbol, tf, price, closed, forming, res, e20, e50, trendHigher, local, btcTrend, pos, plans, sum,
-            System.currentTimeMillis(), conf)
+            System.currentTimeMillis(), conf, supports, resistances)
     }
 
     private fun f2(v: Double) = String.format(Locale.US, "%.2f", v)

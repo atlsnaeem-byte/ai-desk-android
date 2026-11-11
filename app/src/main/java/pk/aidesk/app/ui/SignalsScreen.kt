@@ -420,12 +420,12 @@ fun CandleChart(o: List<Double>, h: List<Double>, l: List<Double>, c: List<Doubl
         val ei = times.indexOfFirst { it >= since }.let { if (it < 0) n - 1 else it }
         val zx = x(ei) - cw / 2
         val zw = right - zx
-        drawRect(C.Green.copy(alpha = 0.15f), Offset(zx, min(y(tp), y(entry))), Size(zw, abs(y(tp) - y(entry))))
-        drawRect(C.Red.copy(alpha = 0.15f), Offset(zx, min(y(sl), y(entry))), Size(zw, abs(y(sl) - y(entry))))
+        drawRect(C.Green.copy(alpha = 0.18f), Offset(zx, min(y(tp), y(entry))), Size(zw, abs(y(tp) - y(entry))))
+        drawRect(C.Red.copy(alpha = 0.18f), Offset(zx, min(y(sl), y(entry))), Size(zw, abs(y(sl) - y(entry))))
         val dash = PathEffect.dashPathEffect(floatArrayOf(8f, 6f))
         drawLine(C.Amber.copy(alpha = 0.7f), Offset(zx, 0f), Offset(zx, size.height), 1.5f, pathEffect = dash)
-        for ((v, col) in listOf(tp to C.Green, entry to C.Txt, sl to C.Red))
-            drawLine(col, Offset(left, y(v)), Offset(right, y(v)), 1.5f, pathEffect = dash)
+        drawLine(C.Txt, Offset(left, y(entry)), Offset(right, y(entry)), 2f, pathEffect = dash)
+        for ((v, col) in listOf(tp to C.Green, sl to C.Red)) drawLine(col, Offset(left, y(v)), Offset(right, y(v)), 5f)
         for (i in 0 until n) {
             val col = if (c[i] >= o[i]) C.Green else C.Red
             val cx = x(i)
@@ -435,17 +435,20 @@ fun CandleChart(o: List<Double>, h: List<Double>, l: List<Double>, c: List<Doubl
         }
         val nc = drawContext.canvas.nativeCanvas
         val paint = android.graphics.Paint().apply { textSize = 24f; isAntiAlias = true; typeface = android.graphics.Typeface.MONOSPACE }
+        paint.textSize = 20f; paint.isFakeBoldText = true
         for ((v, col, lab) in listOf(Triple(tp, C.Green, "TP"), Triple(entry, C.Txt, "Entry"), Triple(sl, C.Red, "SL"))) {
             paint.color = argb(col)
-            nc.drawText(lab, right + 6f, y(v) + 8f, paint)
+            nc.drawText(lab, right + 6f, y(v) - 2f, paint)
+            nc.drawText(px(v), right + 6f, y(v) + 20f, paint)
         }
         paint.color = argb(C.Amber); paint.textSize = 20f
         nc.drawText("signal", zx + 4f, 22f, paint)
         livePrice?.let { p ->
+            val cyan = Color(0xFF22D3EE)
             val ly = y(p.coerceIn(lo, hi))
-            drawLine(C.Blue, Offset(left, ly), Offset(right, ly), 2f)
-            drawRect(C.Blue, Offset(right + 2f, ly - 16f), Size(size.width - right - 2f, 32f))
-            paint.color = android.graphics.Color.WHITE; paint.textSize = 22f
+            drawLine(cyan, Offset(left, ly), Offset(right, ly), 3f)
+            drawRect(cyan, Offset(right + 2f, ly - 18f), Size(size.width - right - 2f, 36f))
+            paint.color = argb(C.Bg); paint.textSize = 22f
             nc.drawText(px(p), right + 6f, ly + 8f, paint)
         }
     }

@@ -300,8 +300,8 @@ private fun CoinView(vm: AppVM, act: MainActivity, sym: String) {
 @Composable
 private fun Legend() {
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        for ((c, l) in listOf(C.Red to "resistance", C.Green to "support", C.Amber to "neckline", Color(0xFF3B82F6) to "EMA20",
-            Color(0xFFA78BFA) to "EMA50")) {
+        for ((c, l) in listOf(LivePx to "price", C.Red to "resistance", C.Green to "support", C.Amber to "neck",
+            Color(0xFF3B82F6) to "EMA20", Color(0xFFA78BFA) to "EMA50")) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.height(3.dp).padding(horizontal = 6.dp).background(c)); T(l, 10.sp, C.Muted)
             }
@@ -460,6 +460,7 @@ private fun PriceField(label: String, value: String, onChange: (String) -> Unit)
 // ================================================================== chart
 private val Ema20 = Color(0xFF3B82F6)
 private val Ema50 = Color(0xFFA78BFA)
+private val LivePx = Color(0xFF22D3EE)      // cyan: never confused with the blue EMA20
 
 @Composable
 private fun PatternChart(a: Advisor.Analysis, bars: Float, offset: Float, lv: ChartLevels?, pos: AppVM.PosLine?, livePx: Double?,
@@ -521,6 +522,7 @@ private fun DrawScope.drawPatternChart(a: Advisor.Analysis, barsWanted: Int, off
     fun incl(v: Double?) { if (v != null && v.isFinite() && v > lo - span0 && v < hi + span0) { lo = min(lo, v); hi = max(hi, v) } }
     if (isNow) for (p in a.scan.active) { p.up?.let { incl(it.at(n)) }; p.dn?.let { incl(it.at(n)) } }
     if (isNow) { lv?.let { incl(it.entry); incl(it.sl); incl(it.tp) }; pos?.let { incl(it.entry); incl(it.sl); incl(it.tp) } }
+    (a.supports.take(2) + a.resistances.take(2)).forEach { incl(it) }
     val pad = (hi - lo) * 0.06 + 1e-12
     lo -= pad; hi += pad
     fun y(v: Double) = (padT + (1 - (v - lo) / (hi - lo)) * H).toFloat()
@@ -556,6 +558,23 @@ private fun DrawScope.drawPatternChart(a: Advisor.Analysis, barsWanted: Int, off
                 }
                 val zc = when (p.bias) { 1 -> C.Green; -1 -> C.Red; else -> C.Blue }
                 drawPath(path, zc.copy(alpha = 0.10f))
+            }
+        }
+        // horizontal support (green) / resistance (red) zones: band = level ± 0.25 ATR
+        val atrNow = a.atr
+        for ((levels, col, tag) in listOf(Triple(a.supports, C.Green, "S"), Triple(a.resistances, C.Red, "R"))) {
+            levels.forEachIndexed { k, v ->
+                if (v < lo || v > hi) return@forEachIndexed
+                val strong = k == 0                                   // nearest level to the price
+                val b = 0.25 * atrNow
+                drawRect(col.copy(alpha = if (strong) 0.16f else 0.09f), Offset(0f, y(v + b)), Size(W, max(2f, y(v - b) - y(v + b))))
+                drawLine(col.copy(alpha = if (strong) 0.95f else 0.6f), Offset(0f, y(v)), Offset(W, y(v)), (if (strong) 2f else 1.2f).dp.toPx())
+                paint.textSize = 10.sp.toPx()
+                val lab = "$tag${k + 1} ${px(v)}"
+                paint.isFakeBoldText = true
+                val tw = paint.measureText(lab)
+                drawRect(C.Bg.copy(alpha = 0.75f), Offset(3.dp.toPx(), y(v) - 12.dp.toPx()), Size(tw + 6.dp.toPx(), 13.dp.toPx()))
+                text(lab, 6.dp.toPx(), y(v) - 2.dp.toPx(), col, bold = true)
             }
         }
         // EMAs
@@ -634,34 +653,59 @@ private fun DrawScope.drawPatternChart(a: Advisor.Analysis, barsWanted: Int, off
         pos?.let { p ->
             val xs = p.opened?.let { t -> val i = cl.openTime.indexOfFirst { it >= t }; if (i >= 0) x(i).toFloat() else x(n).toFloat() } ?: 0f
             val pnlCol = if (p.pnl(last) >= 0) C.Green else C.Red
-            if (p.tp != null) drawRect(C.Green.copy(alpha = 0.07f), Offset(xs, min(y(p.tp), y(p.entry))), Size(W - xs, abs(y(p.tp) - y(p.entry))))
-            if (p.sl != null) drawRect(C.Red.copy(alpha = 0.07f), Offset(xs, min(y(p.sl), y(p.entry))), Size(W - xs, abs(y(p.sl) - y(p.entry))))
-            drawLine(C.Amber, Offset(xs, y(p.entry)), Offset(W, y(p.entry)), 2f)
-            p.sl?.let { drawLine(C.Red, Offset(xs, y(it)), Offset(W, y(it)), 2f) }
-            p.tp?.let { drawLine(C.Green, Offset(xs, y(it)), Offset(W, y(it)), 2f) }
+            if (p.tp != null) drawRect(C.Green.copy(alpha = 0.16f), Offset(xs, min(y(p.tp), y(p.entry))), Size(W - xs, abs(y(p.tp) - y(p.entry))))
+            if (p.sl != null) drawRect(C.Red.copy(alpha = 0.16f), Offset(xs, min(y(p.sl), y(p.entry))), Size(W - xs, abs(y(p.sl) - y(p.entry))))
+            drawLine(C.Amber, Offset(xs, y(p.entry)), Offset(W, y(p.entry)), 2f.dp.toPx())
+            p.sl?.let { drawLine(C.Red, Offset(0f, y(it)), Offset(W, y(it)), 2.4f.dp.toPx()) }
+            p.tp?.let { drawLine(C.Green, Offset(0f, y(it)), Offset(W, y(it)), 2.4f.dp.toPx()) }
             tags += Triple(p.entry, "POS " + px(p.entry), C.Amber)
             p.sl?.let { tags += Triple(it, "SL " + px(it), C.Red) }
             p.tp?.let { tags += Triple(it, "TP " + px(it), C.Green) }
             text("${p.side} ${String.format(Locale.US, "%+.2f", p.pnl(last))} USDT", xs + 4.dp.toPx(), y(p.entry) - 5.dp.toPx(), pnlCol, bold = true)
         }
         if (lv != null && pos == null) {
-            val dd = PathEffect.dashPathEffect(floatArrayOf(10f, 6f))
-            lv.entry?.let { drawLine(C.Txt, Offset(0f, y(it)), Offset(W, y(it)), 1.5f, pathEffect = dd); tags += Triple(it, "ENTRY", C.Txt) }
-            lv.sl?.let { drawLine(C.Red, Offset(0f, y(it)), Offset(W, y(it)), 1.5f, pathEffect = dd); tags += Triple(it, "SL " + px(it), C.Red) }
-            lv.tp?.let { drawLine(C.Green, Offset(0f, y(it)), Offset(W, y(it)), 1.5f, pathEffect = dd); tags += Triple(it, "TP " + px(it), C.Green) }
+            // planned trade: shaded reward (green) / risk (red) boxes from the current candle, thick TP / SL lines
+            val xs = (x(n) - step / 2).toFloat()
+            val e = lv.entry ?: last
+            fun pctTxt(v: Double) = String.format(Locale.US, "%+.2f%%", (v / last - 1) * 100)
+            lv.tp?.let { drawRect(C.Green.copy(alpha = 0.16f), Offset(xs, min(y(it), y(e))), Size(W - xs, abs(y(it) - y(e)))) }
+            lv.sl?.let { drawRect(C.Red.copy(alpha = 0.16f), Offset(xs, min(y(it), y(e))), Size(W - xs, abs(y(it) - y(e)))) }
+            val dd = PathEffect.dashPathEffect(floatArrayOf(12f, 6f))
+            lv.entry?.let { drawLine(C.Txt, Offset(0f, y(it)), Offset(W, y(it)), 1.6f.dp.toPx(), pathEffect = dd); tags += Triple(it, "ENTRY " + px(it), C.Txt) }
+            lv.sl?.let {
+                drawLine(C.Red, Offset(0f, y(it)), Offset(W, y(it)), 2.4f.dp.toPx())
+                text("SL ${px(it)}  ${pctTxt(it)}", xs + 4.dp.toPx(), y(it) + (if (it < e) 13 else -5).dp.toPx(), C.Red, bold = true)
+                tags += Triple(it, "SL " + px(it), C.Red)
+            }
+            lv.tp?.let {
+                drawLine(C.Green, Offset(0f, y(it)), Offset(W, y(it)), 2.4f.dp.toPx())
+                text("TP ${px(it)}  ${pctTxt(it)}", xs + 4.dp.toPx(), y(it) + (if (it < e) 13 else -5).dp.toPx(), C.Green, bold = true)
+                tags += Triple(it, "TP " + px(it), C.Green)
+            }
         }
-        drawLine(C.Txt.copy(alpha = 0.5f), Offset(0f, y(last)), Offset(W, y(last)), 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(2f, 5f)))
+        // current price: solid blue line across the chart
+        drawLine(LivePx, Offset(0f, y(last)), Offset(W, y(last)), 1.6f.dp.toPx())
     }
-    tags += Triple(last, px(last), C.Amber)
 
-    // right-axis tags, spread so they do not overlap
+    // right-axis tags: the current price sits exactly on its line, the others are pushed away from it and from each other
     val th = 16.dp.toPx()
-    val placed = tags.map { Triple(y(it.first), it.second, it.third) }.filter { it.first in padT..(padT + H) }.sortedBy { it.first }.toMutableList()
-    for (k in 1 until placed.size) if (placed[k].first - placed[k - 1].first < th + 1) placed[k] = Triple(placed[k - 1].first + th + 1, placed[k].second, placed[k].third)
-    for ((yy, label, col) in placed) {
+    val py = y(last)
+    val others = tags.map { Triple(y(it.first), it.second, it.third) }.filter { it.first in padT..(padT + H) }
+    val above = others.filter { it.first <= py }.sortedByDescending { it.first }.toMutableList()
+    val below = others.filter { it.first > py }.sortedBy { it.first }.toMutableList()
+    var lim = py - th - 1
+    for (k in above.indices) { if (above[k].first > lim) above[k] = Triple(lim, above[k].second, above[k].third); lim = above[k].first - th - 1 }
+    lim = py + th + 1
+    for (k in below.indices) { if (below[k].first < lim) below[k] = Triple(lim, below[k].second, below[k].third); lim = below[k].first + th + 1 }
+    paint.textSize = 10.sp.toPx()
+    for ((yy, label, col) in above + below) {
         drawRect(col, Offset(W + 2f, yy - th / 2), Size(axisW - 4f, th))
         text(label, W + 5.dp.toPx(), yy + 3.5f.dp.toPx(), C.Bg, bold = true)
     }
+    val ph = 20.dp.toPx()
+    drawRect(LivePx, Offset(W, py - ph / 2), Size(axisW, ph))
+    paint.textSize = 11.sp.toPx()
+    text(px(last), W + 4.dp.toPx(), py + 4.dp.toPx(), C.Bg, bold = true)
     // time labels
     val tfMs = Advisor.TF_MS[a.tf] ?: 900_000L
     for (k in 0..3) {
