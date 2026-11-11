@@ -39,7 +39,7 @@ object Advisor {
         val closed: Candles, val forming: Candles?,              // forming = last (unfinished) candle, may be null
         val scan: Patterns.Result, val ema20: DoubleArray, val ema50: DoubleArray,
         val trendHigher: Int, val trendLocal: Int, val btcTrend: Int?, val positioning: Map<String, Double?>,
-        val plans: List<Plan>, val summary: List<String>, val time: Long,
+        val plans: List<Plan>, val summary: List<String>, val time: Long, val conf: Confluence.Setup? = null,
     ) {
         val best: Plan? get() = plans.firstOrNull()
         val atr: Double get() = scan.atr.lastOrNull() ?: 0.0
@@ -158,7 +158,16 @@ object Advisor {
                     false, 0, true)?.let { cand += it }
             }
         }
-        val plans = cand.sortedWith(compareByDescending<Plan> { it.score }.thenByDescending { it.rr }).distinctBy { it.setup + it.side }.take(4)
+        // 4) TA-course confluence setup on the last closed candle (RSI divergence / S-R bounce / range fade)
+        val conf = Confluence.evaluate(closed, trendHigher, res.active)
+        val confPlan = conf?.let { s ->
+            val side = s.side
+            if ((price - s.sl) * side <= 0 || (s.tp - price) * side <= 0) null     // price already beyond a level
+            else Plan(s.sideName, "MARKET", price, s.sl, s.tp, "Course setup: ${s.title}",
+                s.why + Confluence.backtestNote(tf, s.kinds), s.score)
+        }
+        val plans = (listOfNotNull(confPlan) +
+            cand.sortedWith(compareByDescending<Plan> { it.score }.thenByDescending { it.rr }).distinctBy { it.setup + it.side }).take(4)
 
         // plain-language summary
         val sum = ArrayList<String>()
@@ -181,13 +190,20 @@ object Advisor {
         ls?.let { pb += "long/short accounts ${f2(it)}" }
         pos["taker_bs"]?.let { pb += "taker buy/sell ${f2(it)}" }
         if (pb.isNotEmpty()) sum += "Positioning: " + pb.joinToString(", ")
+        val rsiNow = Confluence.rsi(c).last()
+        sum += "RSI ${String.format(Locale.US, "%.0f", rsiNow)}" + when { rsiNow > 70 -> " (overbought)"; rsiNow < 30 -> " (oversold)"; else -> "" } +
+            " · course setup on the last $tf candle: " +
+            (conf?.let { "${it.sideName} ${it.title}, confluence score ${it.score}" } ?: "none")
         sum += when {
+            confPlan != null && conf != null && tf in Confluence.TFS && conf.kinds.any { it in Confluence.SIGNAL_KINDS } ->
+                "Verdict: course signal ${confPlan.side} — ${conf.title} (score ${conf.score})."
             plans.isEmpty() -> "Verdict: no clean setup. Wait."
             plans[0].score >= 3 -> "Verdict: ${plans[0].grade.lowercase()} ${plans[0].side} setup — ${plans[0].setup}."
             plans[0].score >= 1 -> "Verdict: only weak setups. Small size or wait."
             else -> "Verdict: setups fight the trend. Avoid."
         }
-        return Analysis(symbol, tf, price, closed, forming, res, e20, e50, trendHigher, local, btcTrend, pos, plans, sum, System.currentTimeMillis())
+        return Analysis(symbol, tf, price, closed, forming, res, e20, e50, trendHigher, local, btcTrend, pos, plans, sum,
+            System.currentTimeMillis(), conf)
     }
 
     private fun f2(v: Double) = String.format(Locale.US, "%.2f", v)

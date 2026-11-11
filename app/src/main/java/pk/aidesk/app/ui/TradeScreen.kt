@@ -161,7 +161,8 @@ private fun CoinView(vm: AppVM, act: MainActivity, sym: String) {
     var askClose by remember { mutableStateOf(false) }
     val ticket = remember(sym) { TicketState(cfg.leverage.coerceIn(1, 20)) }
     DisposableEffect(sym) { onDispose { vm.stopAnalysis() } }
-    LaunchedEffect(sym) { vm.loadManual() }
+    val taList by vm.taSignals.collectAsState()
+    LaunchedEffect(sym) { vm.loadManual(); vm.loadTa() }
 
     val an = a?.takeIf { it.symbol == sym && it.tf == tf }
     val plan = an?.plans?.getOrNull(sel)
@@ -236,6 +237,28 @@ private fun CoinView(vm: AppVM, act: MainActivity, sym: String) {
                         Gap(3.dp)
                     }
                     T("Rule-based read of the chart, not a promise. Laptop backtests found no reliable edge in chart patterns alone: keep size small.", 10.sp, C.Dim)
+                }
+                val taAct = taList.filter { it.active && it.symbol == sym }
+                if (taAct.isNotEmpty()) {
+                    SectionTitle("Course signal (scanner)")
+                    for (s in taAct) {
+                        Card(border = C.side(s.side)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Pill(s.side, C.side(s.side), filled = true); HGap(6.dp); Pill(s.tf, C.Blue); HGap(6.dp)
+                                T(s.title, 13.sp, C.Txt, FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 2)
+                                Pill("score ${s.score}", C.Amber)
+                            }
+                            T("Signalled at the ${dayHhmm(s.since)} close · entry ${px(s.entry)} · SL ${px(s.sl)} · TP ${px(s.tp)}", 11.sp, C.Muted, mono = true)
+                            for (w in s.why) T(w, 11.sp, when { w.startsWith("+") -> C.Green; w.startsWith("-") -> C.Red; else -> C.Muted })
+                            Gap(6.dp)
+                            Btn("Use this in the ticket", C.side(s.side), outline = true, height = 36.dp) {
+                                if (s.tf != tf) vm.setTf(s.tf)
+                                ticket.fill(Advisor.Plan(s.side, "MARKET", live ?: s.entry, s.sl, s.tp, "Course: ${s.title} ${s.tf}", s.why, s.score))
+                                ticket.touched = true
+                            }
+                        }
+                        Gap(6.dp)
+                    }
                 }
                 SectionTitle("Suggested trades")
                 if (an.plans.isEmpty()) T("No clean setup on $tf right now. Try another timeframe or wait.", 13.sp, C.Muted)

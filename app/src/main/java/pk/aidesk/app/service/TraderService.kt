@@ -27,6 +27,7 @@ import pk.aidesk.app.core.Config
 import pk.aidesk.app.core.CopyBot
 import pk.aidesk.app.core.Engine
 import pk.aidesk.app.core.ShortHunter
+import pk.aidesk.app.core.TaScanner
 import pk.aidesk.app.core.UserError
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -170,6 +171,7 @@ class TraderService : Service() {
                     if (it is UserError) Notifier.problem(this@TraderService, msg)
                 }
                 runShortHunter()
+                runTaScan()
             } finally {
                 ticks.value = System.currentTimeMillis()
                 Notifier.updateStatus(this@TraderService, engine)
@@ -190,6 +192,17 @@ class TraderService : Service() {
             sh.step(c.mode, api) { api.equity() }.forEach { Notifier.event(this, engine, it) }
         } catch (e: Exception) {
             engine.store.log("ERROR", "Short hunter: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    /** TA-course setups (4h RSI divergence / range fade) on the scanner's coins: signals only, never trades by itself. */
+    private fun runTaScan() {
+        try {
+            val c = engine.cfg()
+            val api = Binance().also { it.syncTime() }
+            TaScanner(engine.store).step(api, c.symbols).forEach { Notifier.event(this, engine, it) }
+        } catch (e: Exception) {
+            engine.store.log("ERROR", "TA scan: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")
         }
     }
 

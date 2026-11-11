@@ -325,6 +325,21 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         openPos.value = null
     }
 
+    // ------------------------------------------------------------------ TA-course signals (4h divergence / range fade)
+    val taScanner = pk.aidesk.app.core.TaScanner(store)
+    val taSignals = MutableStateFlow<List<pk.aidesk.app.core.TaSignal>>(emptyList())
+
+    fun loadTa() = viewModelScope.launch { taSignals.value = withContext(Dispatchers.IO) { taScanner.all() }.sortedByDescending { it.since } }
+
+    fun clearTaClosed() = viewModelScope.launch { withContext(Dispatchers.IO) { taScanner.clearClosed() }; loadTa() }
+
+    /** Open a coin in the Trade tab on the signal's timeframe (Signals card / notification). */
+    fun openTaSignal(symbol: String, tf: String) {
+        tab.value = "trade"; detail.value = null
+        tradeTf.value = tf
+        openCoin(symbol)
+    }
+
     fun setTf(tf: String) {
         if (tf == tradeTf.value) return
         tradeTf.value = tf

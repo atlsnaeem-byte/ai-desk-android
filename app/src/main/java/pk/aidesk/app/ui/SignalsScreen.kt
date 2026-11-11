@@ -49,6 +49,7 @@ import pk.aidesk.app.MainActivity
 import pk.aidesk.app.TopBar
 import pk.aidesk.app.core.Config
 import pk.aidesk.app.core.Signal
+import pk.aidesk.app.core.TaSignal
 import pk.aidesk.app.service.TraderService
 import kotlin.math.abs
 import kotlin.math.max
@@ -78,7 +79,10 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
 
     val log by vm.sigLog.collectAsState()
     val marks by vm.marks.collectAsState()
+    val ta by vm.taSignals.collectAsState()
+    val ticks by TraderService.ticks.collectAsState()
     LaunchedEffect(scan?.time) { vm.loadSigLog() }
+    LaunchedEffect(ticks) { vm.loadTa() }
     LaunchedEffect(Unit) { while (true) { vm.refreshMarks(); delay(15_000) } }
     // A signal is closed once its stop-loss or target was hit (bar check by the scanner, or the live price since then).
     fun closedWhy(s: Signal): String? {
@@ -154,6 +158,36 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
                 scan?.error?.let { T(it, 12.sp, C.Amber) }
                 Gap(8.dp)
             }
+            // ---- TA-course setups (4h RSI divergence / range fade), from TaScanner
+            fun taHit(s: TaSignal): String? {
+                val m = marks[s.symbol] ?: return null
+                return when { (m - s.sl) * s.dir <= 0 -> "SL"; (m - s.tp) * s.dir >= 0 -> "TP"; else -> null }
+            }
+            val taShown = if (filter == "closed") ta.filter { !it.active }.take(20)
+                else ta.filter { it.active && taHit(it) == null }.filter {
+                    when (filter) { "long" -> it.side == "LONG"; "short" -> it.side == "SHORT"; else -> true }
+                }
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    T("Course setups · 4h", 14.sp, C.Txt, FontWeight.Bold)
+                    HGap(6.dp); T("RSI divergence · range fade · S/R confluence", 11.sp, C.Dim, modifier = Modifier.weight(1f), maxLines = 1)
+                    if (filter == "closed" && taShown.isNotEmpty()) T("Clear", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { vm.clearTaClosed() })
+                }
+                vm.taScanner.stats()?.let { T("Results so far: $it", 11.sp, C.Muted) }
+                if (taShown.isEmpty()) T(if (filter == "closed") "No closed course setups yet." else
+                    "No course setup active. The coins are checked at every 4h close (05:00, 09:00, 13:00 … PKT).", 12.sp, C.Muted,
+                    modifier = Modifier.padding(vertical = 4.dp))
+                Gap(6.dp)
+            }
+            items(taShown, key = { "ta" + it.id }) { s ->
+                TaCard(s, marks[s.symbol], taHit(s)) { vm.openTaSignal(s.symbol, s.tf) }
+                Gap(8.dp)
+            }
+            item {
+                Gap(4.dp)
+                T("AI model signals · 15m", 14.sp, C.Txt, FontWeight.Bold)
+                Gap(6.dp)
+            }
             if (shown.isEmpty()) item {
                 T(if (filter == "closed") "No closed signals in this scan." else "No active signals: every signal of this scan already hit its stop or target. New ones come at the next 15-minute close.",
                     13.sp, C.Muted, modifier = Modifier.padding(8.dp))
@@ -206,6 +240,43 @@ fun SignalCard(s: Signal, onClick: () -> Unit) {
             T("TP ${px(s.tp)}", 11.sp, C.Green, mono = true)
             T("SL ${px(s.sl)}", 11.sp, C.Red, mono = true)
         }
+    }
+}
+
+@Composable
+fun TaCard(s: TaSignal, mark: Double?, hit: String?, onClick: () -> Unit) {
+    val col = C.side(s.side)
+    Card(border = if (s.active) col else C.Border, faded = !s.active, onClick = onClick) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            T(s.symbol, 15.sp, C.Txt, FontWeight.Bold)
+            HGap(8.dp)
+            Pill(s.side, col, filled = s.active); HGap(6.dp)
+            Pill(s.tf, C.Blue); HGap(6.dp)
+            Pill("score ${s.score}", if (s.score >= 4) C.Green else if (s.score >= 2) C.Amber else C.Muted)
+            Box(Modifier.weight(1f))
+            Column(horizontalAlignment = Alignment.End) {
+                T(hhmm(s.since), 13.sp, C.Txt, FontWeight.SemiBold, mono = true)
+                T(when (s.status) { "TP" -> "target hit"; "SL" -> "stop hit"; "TIME" -> "time exit"; else -> "4h close" }, 10.sp,
+                    if (s.status == "TP") C.Green else if (s.status == "SL") C.Red else C.Muted)
+            }
+        }
+        Gap(4.dp)
+        T(s.title, 13.sp, C.Txt, FontWeight.SemiBold)
+        s.why.firstOrNull()?.let { T(it.removePrefix("+ "), 11.sp, C.Muted, maxLines = 2) }
+        Gap(6.dp)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            T("E ${px(s.entry)}", 11.sp, C.Muted, mono = true)
+            T("TP ${px(s.tp)}", 11.sp, C.Green, mono = true)
+            T("SL ${px(s.sl)}", 11.sp, C.Red, mono = true)
+            T("R:R ${f2(s.rr)}", 11.sp, C.Amber, mono = true)
+        }
+        val r = s.r ?: mark?.let { s.dir * (it - s.entry) / abs(s.entry - s.sl) }
+        r?.let {
+            Gap(4.dp)
+            T((if (s.active) "now ${px(mark)} · " else "") + "${sgn2(it)}R" + (if (hit != null) " · ${if (hit == "TP") "target" else "stop"} touched" else ""),
+                11.sp, if (it >= 0) C.Green else C.Red, FontWeight.SemiBold)
+        }
+        if (s.active) T("Tap to open the 4h chart and order ticket", 10.sp, C.Dim)
     }
 }
 

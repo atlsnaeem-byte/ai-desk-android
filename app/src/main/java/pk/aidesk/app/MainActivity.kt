@@ -76,6 +76,7 @@ class MainActivity : FragmentActivity() {
             vm.detail.value = sym
             if (i.getBooleanExtra("take", false)) vm.take.value = sym
         }
+        if (sym != null && i.getStringExtra("tab") == "trade") vm.openTaSignal(sym, i.getStringExtra("tf") ?: "4h")
     }
 
     override fun onResume() {
