@@ -55,15 +55,25 @@ class TaScanner(private val store: Store) {
 
     fun clearClosed() = save(all().filter { it.active })
 
+    /** Auto-trade course setups (on by default): stored in ta_cfg.json. */
+    var auto: Boolean
+        get() = store.readObj("ta_cfg.json")?.optBoolean("auto", true) ?: true
+        set(v) { store.writeObj("ta_cfg.json", (store.readObj("ta_cfg.json") ?: JSONObject()).put("auto", v)) }
+
+    /** What one scan produced: notifications, new signals (to trade) and signals that just hit their time exit (to close). */
+    class StepResult(val events: List<Event>, val opened: List<TaSignal>, val timeExits: List<TaSignal>)
+
     private fun closed(c: Candles, now: Long): Candles {
         var n = c.size
         while (n > 0 && c.closeTime[n - 1] >= now) n--
         return Advisor.slice(c, 0, n)
     }
 
-    fun step(api: Binance, symbols: List<String>): List<Event> {
+    fun step(api: Binance, symbols: List<String>): StepResult {
         val now = api.nowMs()
         val events = ArrayList<Event>()
+        val opened = ArrayList<TaSignal>()
+        val timeExits = ArrayList<TaSignal>()
         val list = all().toMutableList()
         var changed = false
         for (tf in Confluence.TFS) {
@@ -78,7 +88,7 @@ class TaScanner(private val store: Store) {
                     // resolve this coin's open signals on this timeframe
                     for ((k, sg) in list.withIndex()) {
                         if (!sg.active || sg.symbol != s || sg.tf != tf) continue
-                        resolve(sg, cd)?.let { list[k] = it; changed = true }
+                        resolve(sg, cd)?.let { list[k] = it; changed = true; if (it.status == "TIME") timeExits += it }
                     }
                     if (list.any { it.active && it.symbol == s && it.tf == tf }) continue
                     val hi = closed(api.candles(s, Advisor.HIGHER.getValue(tf), 260), now)
@@ -87,7 +97,7 @@ class TaScanner(private val store: Store) {
                     val sg = TaSignal("$s-$tf-${setup.barTime}", s, tf, setup.sideName, setup.score, setup.title,
                         setup.why + Confluence.backtestNote(tf, setup.kinds), setup.barTime, setup.barTime + ms, setup.entry, setup.sl, setup.tp)
                     if (list.any { it.id == sg.id }) continue
-                    list += sg; changed = true
+                    list += sg; changed = true; opened += sg
                     events += Event("tasignal", "Course setup: ${sg.side} $s $tf  -  score ${sg.score}",
                         "${sg.title}  -  entry ${Advisor.f(sg.entry)}  TP ${Advisor.f(sg.tp)}  SL ${Advisor.f(sg.sl)}", true, s)
                 } catch (e: Exception) {
@@ -98,7 +108,7 @@ class TaScanner(private val store: Store) {
             store.writeObj("ta_state.json", st.put(key, lastOpen))
         }
         if (changed) save(list)
-        return events
+        return StepResult(events, opened, timeExits)
     }
 
     /** Walk the bars after the signal bar: SL first, then TP, else time exit after HOLD bars. */

@@ -173,6 +173,14 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
                     HGap(6.dp); T("RSI divergence · range fade · S/R confluence", 11.sp, C.Dim, modifier = Modifier.weight(1f), maxLines = 1)
                     if (filter == "closed" && taShown.isNotEmpty()) T("Clear", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { vm.clearTaClosed() })
                 }
+                val taAuto by vm.taAuto.collectAsState()
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    T(if (taAuto) "Auto-trade ON (${cfg.mode.uppercase()}): market order with the signal's SL/TP, risk ${pctTxt(cfg.riskPct)}% · ${cfg.leverage}x"
+                        else "Auto-trade OFF: alerts only", 11.sp, if (taAuto) C.Green else C.Muted, modifier = Modifier.weight(1f))
+                    androidx.compose.material3.Switch(taAuto, { on ->
+                        if (on && cfg.mode == "live") act.confirmUser("Auto-trade course setups LIVE") { vm.setTaAuto(true) } else vm.setTaAuto(on)
+                    }, colors = androidx.compose.material3.SwitchDefaults.colors(checkedTrackColor = C.Green, checkedThumbColor = C.Txt))
+                }
                 vm.taScanner.stats()?.let { T("Results so far: $it", 11.sp, C.Muted) }
                 if (taShown.isEmpty()) T(if (filter == "closed") "No closed course setups yet." else
                     "No course setup active. The coins are checked at every 4h close (05:00, 09:00, 13:00 … PKT).", 12.sp, C.Muted,

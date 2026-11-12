@@ -350,6 +350,8 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------------ TA-course signals (4h divergence / range fade)
     val taScanner = pk.aidesk.app.core.TaScanner(store)
     val taSignals = MutableStateFlow<List<pk.aidesk.app.core.TaSignal>>(emptyList())
+    val taAuto = MutableStateFlow(taScanner.auto)
+    fun setTaAuto(on: Boolean) { taScanner.auto = on; taAuto.value = on; if (on) TraderService.start(getApplication()) }
 
     fun loadTa() = viewModelScope.launch { taSignals.value = withContext(Dispatchers.IO) { taScanner.all() }.sortedByDescending { it.since } }
 

@@ -26,6 +26,7 @@ import pk.aidesk.app.core.BinanceException
 import pk.aidesk.app.core.Config
 import pk.aidesk.app.core.CopyBot
 import pk.aidesk.app.core.Engine
+import pk.aidesk.app.core.ManualDesk
 import pk.aidesk.app.core.ShortHunter
 import pk.aidesk.app.core.TaScanner
 import pk.aidesk.app.core.UserError
@@ -201,7 +202,34 @@ class TraderService : Service() {
         try {
             val c = engine.cfg()
             val api = Binance().also { it.syncTime() }
-            TaScanner(engine.store).step(api, c.symbols).forEach { Notifier.event(this, engine, it) }
+            val ta = TaScanner(engine.store)
+            val res = ta.step(api, c.symbols)
+            res.events.forEach { Notifier.event(this, engine, it) }
+            if (!ta.auto || (res.opened.isEmpty() && res.timeExits.isEmpty())) return
+            val trade = engine.client(c).also { it.syncTime() }
+            val desk = ManualDesk(engine.store)
+            // time exit after 30 four-hour bars: close the course trade still open on that coin
+            for (sg in res.timeExits) {
+                if (desk.active(c.mode).none { it.symbol == sg.symbol && it.setup.startsWith("Course") }) continue
+                runCatching { desk.closeSymbol(c, trade, sg.symbol) }
+                    .onSuccess { msg -> msg?.let { Notifier.event(this, engine, pk.aidesk.app.core.Event("close", "Course trade closed (time exit)", it, false, sg.symbol)) } }
+                    .onFailure { engine.store.log("ERROR", "Course time exit ${sg.symbol}: ${(it as? BinanceException)?.msg ?: it.message}") }
+            }
+            // new setups: MARKET order with the signal's SL / TP, sized by Settings > risk per trade and leverage
+            val busy = engine.store.botSymbols(c.mode).keys + engine.store.state(c.mode, c.paperStartEquity).open.keys
+            for (sg in res.opened) {
+                if (sg.symbol in busy) { engine.store.log("INFO", "Course ${sg.symbol}: skip, coin already held by another bot"); continue }
+                try {
+                    val msg = desk.place(c, trade, pk.aidesk.app.core.Ticket(sg.symbol, sg.side, "MARKET", 0.0, sg.sl, sg.tp, c.riskPct,
+                        c.leverage, 24, "Course ${sg.tf}: ${sg.title}"))
+                    Notifier.event(this, engine, pk.aidesk.app.core.Event("open", "Course trade opened: ${sg.side} ${sg.symbol}", msg, true, sg.symbol))
+                } catch (e: Exception) {
+                    val m = (e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName
+                    engine.store.log("ERROR", "Course trade ${sg.symbol}: $m")
+                    Notifier.event(this, engine, pk.aidesk.app.core.Event("error", "Course trade not opened: ${sg.symbol}", m, false, sg.symbol))
+                }
+            }
+            ensureManualLoop()
         } catch (e: Exception) {
             engine.store.log("ERROR", "TA scan: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")
         }
