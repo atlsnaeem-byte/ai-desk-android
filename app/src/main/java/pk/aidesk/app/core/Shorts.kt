@@ -413,8 +413,9 @@ class ShortHunter(private val store: Store) {
         return try {
             val px = api.markPrice(HEDGE)
             val f = api.filters(HEDGE)
-            val (bq, bqs) = api.fmtQty(HEDGE, notional / px)
-            if (bq < f.minQty || bq * px < f.minNotional) {
+            // paper simulates any size (exact qty); live must respect Binance's BTC minimum (about 100 USDT)
+            val (bq, bqs) = if (mode == "paper") (notional / px) to "" else api.fmtQty(HEDGE, notional / px)
+            if (mode != "paper" && (bq < f.minQty || bq * px < f.minNotional)) {
                 store.log("INFO", "BTC hedge for ${p.symbol}: skip, ${f2(bq * px)} USDT is below Binance's BTC minimum ${f2(f.minNotional)} USDT")
                 return "  -  no BTC hedge (below BTC minimum ${f2(f.minNotional)} USDT)"
             }
