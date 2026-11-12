@@ -455,15 +455,21 @@ class Engine(context: Context) {
         val st = store.state(c.mode, c.paperStartEquity)
         if (!trading(c)) {
             val man = ManualDesk(store).paperOpen(c.mode)
-            val shorts = ShortHunter(store).state(c.mode).open.values.toList()
+            val shSt = ShortHunter(store).state(c.mode)
+            val shorts = shSt.open.values.toList()
+            val (hq, he) = shSt.hedge()
             val copies = CopyBot(store).state(c.mode).copies.values.toList()
             val any = st.open.isNotEmpty() || man.isNotEmpty() || shorts.isNotEmpty() || copies.isNotEmpty()
             val marks = if (any) runCatching { api.markPrices() }.getOrDefault(emptyMap()) else emptyMap()
             // bot positions use their own paper wallets: listed with live P&L, not added to this equity
             val botPos = shorts.map { p ->
                 val mk = marks[p.symbol]
-                Position(p.symbol, "SHORT", p.qty, p.entry, mk, if (mk != null) p.qty * (p.entry - mk) else 0.0, p.sl, p.tp, p.opened, true, "short hunter")
-            } + copies.map { p ->
+                Position(p.symbol, "SHORT", p.qty, p.entry, mk, if (mk != null) p.qty * (p.entry - mk) else 0.0, p.sl, p.tp, p.opened, true,
+                    "short hunter · " + p.rule)
+            } + (if (hq > 0) listOf(marks[ShortHunter.HEDGE].let { mk ->
+                Position(ShortHunter.HEDGE, "LONG", hq, he, mk, if (mk != null) hq * (mk - he) else 0.0, null, null,
+                    shorts.filter { it.hedgeQty > 0 }.minOfOrNull { it.opened }, true, "btc hedge")
+            }) else emptyList()) + copies.map { p ->
                 val mk = marks[p.symbol]
                 val dr = if (p.side == "LONG") 1 else -1
                 Position(p.symbol, p.side, p.qty, p.entry, mk, if (mk != null) p.qty * dr * (mk - p.entry) else 0.0, null, null, p.opened, true, "copy")

@@ -1,4 +1,4 @@
-package pk.aidesk.app.ui
+﻿package pk.aidesk.app.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -497,7 +497,7 @@ fun TakeSheet(vm: AppVM, act: MainActivity, symbol: String) {
                 T("Risk per trade", 13.sp, C.Muted, modifier = Modifier.weight(1f))
                 T("${risk.toInt()}%", 14.sp, C.Amber, FontWeight.Bold)
             }
-            Slider(risk, { risk = it.toInt().toFloat() }, valueRange = 1f..50f, steps = 48,
+            Slider(risk, { risk = it.toInt().toFloat() }, valueRange = 1f..100f, steps = 98,
                 onValueChangeFinished = { vm.loadPreview(symbol, risk.toDouble()) },
                 colors = SliderDefaults.colors(thumbColor = C.Txt, activeTrackColor = C.Amber, inactiveTrackColor = C.Panel2))
             if (risk > cfg.dailyLossPct) T("Risk is above your daily loss limit (${cfg.dailyLossPct}%): one loss pauses auto for the day.", 11.sp, C.Amber)

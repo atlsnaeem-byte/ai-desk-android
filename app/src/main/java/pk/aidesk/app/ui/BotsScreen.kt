@@ -1,4 +1,4 @@
-package pk.aidesk.app.ui
+﻿package pk.aidesk.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -89,25 +89,40 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
     val marks by vm.marks.collectAsState()
     val c = v?.cfg ?: vm.shortHunter.cfg()
     val mode = cfgApp.mode
+    fun save(n: pk.aidesk.app.core.ShortCfg, msg: String? = null) { vm.saveShortCfg(n); msg?.let { vm.toast.value = it } }
 
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
         item {
-            EnableRow("Auto-short new listings", if (c.enabled) "Shorts every new coin on day ${c.entryDay} (${mode.uppercase()})" else "Off: shortlist only",
-                c.enabled, mode, act) { vm.saveShortCfg(c.copy(enabled = it)); vm.toast.value = if (it) "Short hunter on (${mode.uppercase()})" else "Short hunter off. Open shorts keep their SL/TP." }
+            T("All rules trade automatically (${mode.uppercase()}), checked every 15 minutes in the background. Paper mode needs no API key.",
+                11.sp, C.Muted)
             Gap(6.dp)
-            EnableRow("Auto-short pump signals", if (c.pumpAuto) "Shorts coins up +50% in a day / +100% in 3 days · SL +${c.pumpSlPct.toInt()}% TP −${c.pumpTpPct.toInt()}% (${mode.uppercase()})"
-                else "Off · this rule lost 2–3% per trade in the 2026 backtest", c.pumpAuto, mode, act) {
-                vm.saveShortCfg(c.copy(pumpAuto = it))
-                vm.toast.value = if (it) "Pump shorts on (${mode.uppercase()}): checked every 15 min" else "Pump shorts off"
+            EnableRow("1 · New-listing short", "Short every new coin on day ${c.entryDay} · SL +${c.slPct.toInt()}% · TP −${c.tpPct.toInt()}% · ${c.holdDays} days",
+                c.enabled, mode, act) { save(c.copy(enabled = it), if (it) "New-listing shorts on" else "New-listing shorts off") }
+            Gap(6.dp)
+            EnableRow("2 · Pump short", "+50% in 1 day / +100% in 3 days" +
+                (if (c.fundingFilterOn) " · only if funding ≥ +${String.format(Locale.US, "%.2f", c.pumpMinFunding)}%" else " · no funding filter") +
+                " · SL +${c.pumpSlPct.toInt()}% · TP −${c.pumpTpPct.toInt()}% · ${c.pumpHoldDays} days", c.pumpAuto, mode, act) {
+                save(c.copy(pumpAuto = it), if (it) "Pump shorts on" else "Pump shorts off")
             }
+            Gap(6.dp)
+            EnableRow("3 · Scale-in on pump shorts", "Half now, other half if it rises +${c.scaleAddPct.toInt()}%, one stop +${c.scaleStopPct.toInt()}% above the first entry",
+                c.scaleIn, mode, act) { save(c.copy(scaleIn = it)) }
+            Gap(6.dp)
+            EnableRow("4 · Delisting / monitoring-tag short", "Short after a Binance announcement · SL +${c.annSlPct.toInt()}% · TP −${c.annTpPct.toInt()}% · ${c.annHoldDays} days",
+                c.annAuto, mode, act) { save(c.copy(annAuto = it), if (it) "Announcement shorts on" else "Announcement shorts off") }
+            Gap(6.dp)
+            EnableRow("5 · BTC hedge bot", "Every short gets a BTC long of the same size, closed together (uses 2× margin)",
+                c.btcHedge, mode, act) { save(c.copy(btcHedge = it), if (it) "BTC hedge on for new shorts" else "BTC hedge off for new shorts") }
             Gap(8.dp)
             val st = v?.state; val jr = v?.journal ?: emptyList()
             val pnl = jr.sumOf { it.pnl }
+            val openPnl = st?.open?.values?.sumOf { p -> marks[p.symbol]?.let { (p.entry - it) * p.qty } ?: 0.0 } ?: 0.0
+            val hedgePnl = st?.hedge()?.let { (q, e) -> marks["BTCUSDT"]?.let { q * (it - e) } } ?: 0.0
             Kpis(listOf(
                 Triple(if (mode == "paper") "Paper equity" else "Mode", if (mode == "paper") st?.let { f2(it.paperEquity) } ?: "-" else mode.uppercase(), C.Txt),
                 Triple("Open", "${st?.open?.size ?: 0}/${c.maxPositions}", C.Txt),
-                Triple("Closed", "${jr.size}" + if (jr.isNotEmpty()) " · ${jr.count { it.pnl > 0 } * 100 / jr.size}%" else "", C.Txt),
-                Triple("P&L", sgn2(pnl), pnlColor(pnl)),
+                Triple("Open P&L", sgn2(openPnl + hedgePnl), pnlColor(openPnl + hedgePnl)),
+                Triple("Closed P&L", sgn2(pnl), pnlColor(pnl)),
             ))
             err?.let { Gap(6.dp); T(it, 12.sp, C.Amber) }
             Gap(6.dp)
@@ -115,8 +130,42 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
                 T(v?.let { "Updated ${hhmm(it.at)}" + if (loading) " · loading…" else "" } ?: "Loading Binance listings…", 11.sp, C.Dim, modifier = Modifier.weight(1f))
                 T("Refresh", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { vm.loadShorts(true) })
             }
-            SectionTitle("New listings")
+            SectionTitle("Open shorts")
         }
+        val open = v?.state?.open?.values?.toList() ?: emptyList()
+        if (open.isEmpty()) item { T("No open shorts.", 13.sp, C.Muted) }
+        for (p in open) item(key = "o" + p.symbol) {
+            val mk = marks[p.symbol]
+            val upnl = mk?.let { (p.entry - it) * p.qty }
+            val hp = if (p.hedgeQty > 0) marks["BTCUSDT"]?.let { p.hedgeQty * (it - p.hedgeEntry) } else null
+            Card(border = if (upnl == null) C.Border else pnlColor(upnl + (hp ?: 0.0)), onClick = { vm.showChart(p.symbol) }) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    T(p.symbol, 14.sp, C.Txt, FontWeight.Bold); HGap(8.dp); Pill("SHORT", C.Red, filled = true); Box(Modifier.weight(1f))
+                    Column(horizontalAlignment = Alignment.End) {
+                        T(upnl?.let { (if (it >= 0) "Profit " else "Loss ") + "${sgn2(it)} USDT" } ?: "-", 15.sp, pnlColor(upnl), FontWeight.Bold)
+                        upnl?.let { T("${sgn1(it / p.margin * 100)}% of ${f2(p.margin)} margin", 11.sp, pnlColor(it)) }
+                    }
+                }
+                T("Entry ${px(p.entry)} · now ${px(mk)} · SL ${px(p.sl)} · TP ${px(p.tp)}", 11.sp, C.Muted, mono = true)
+                p.addPrice?.let { T("Scale-in: adds ${px(p.addQty)} more at ${px(it)}", 11.sp, C.Amber) }
+                if (p.hedgeQty > 0) T("BTC hedge long ${px(p.hedgeQty)} @ ${px(p.hedgeEntry)} · " + (hp?.let { "${sgn2(it)} USDT" } ?: "-"), 11.sp, pnlColor(hp))
+                T("Opened ${dayHhmm(p.opened)} · ${p.rule} · time exit ${dayHhmm(p.exitAt)}", 11.sp, C.Muted)
+                var ask by remember { mutableStateOf(false) }
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                    Box(Modifier.weight(1f))
+                    T("Close now", 13.sp, C.Red, FontWeight.Bold, modifier = Modifier.clickable { ask = true })
+                }
+                if (ask) AlertDialog(onDismissRequest = { ask = false },
+                    confirmButton = { TextButton({ ask = false
+                        if (mode == "live") act.confirmUser("Close LIVE short ${p.symbol}") { vm.shortClose(p.symbol) } else vm.shortClose(p.symbol)
+                    }) { Text("Close at market", color = C.Red) } },
+                    dismissButton = { TextButton({ ask = false }) { Text("Keep") } },
+                    title = { Text("Close ${p.symbol} short?") }, text = { Text("Buys back the short at market, removes its SL/TP and closes its BTC hedge.") },
+                    containerColor = C.Panel)
+            }
+            Gap(6.dp)
+        }
+        item { SectionTitle("New listings") }
         val lst = v?.listings ?: emptyList()
         if (lst.isEmpty()) item { T("No coins listed in the last ${c.entryDay + c.holdDays} days.", 13.sp, C.Muted) }
         for (l in lst) item(key = "l" + l.symbol) {
@@ -134,38 +183,7 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
             }
             Gap(6.dp)
         }
-        item { SectionTitle("Open shorts") }
-        val open = v?.state?.open?.values?.toList() ?: emptyList()
-        if (open.isEmpty()) item { T("No open shorts.", 13.sp, C.Muted) }
-        for (p in open) item(key = "o" + p.symbol) {
-            val mk = marks[p.symbol]
-            val upnl = mk?.let { (p.entry - it) * p.qty }
-            Card(border = if (upnl == null) C.Border else pnlColor(upnl), onClick = { vm.showChart(p.symbol) }) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    T(p.symbol, 14.sp, C.Txt, FontWeight.Bold); HGap(8.dp); Pill("SHORT", C.Red, filled = true); Box(Modifier.weight(1f))
-                    Column(horizontalAlignment = Alignment.End) {
-                        T(upnl?.let { "${sgn2(it)} USDT" } ?: "-", 15.sp, pnlColor(upnl), FontWeight.Bold)
-                        upnl?.let { T("${sgn1(it / p.margin * 100)}% of ${f2(p.margin)} margin", 11.sp, pnlColor(it)) }
-                    }
-                }
-                T("Entry ${px(p.entry)} · now ${px(mk)} · SL ${px(p.sl)} · TP ${px(p.tp)}", 11.sp, C.Muted, mono = true)
-                T("Opened ${dayHhmm(p.opened)} · ${p.rule} · time exit ${dayHhmm(p.exitAt)}", 11.sp, C.Muted)
-                var ask by remember { mutableStateOf(false) }
-                Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
-                    Box(Modifier.weight(1f))
-                    T("Close now", 13.sp, C.Red, FontWeight.Bold, modifier = Modifier.clickable { ask = true })
-                }
-                if (ask) AlertDialog(onDismissRequest = { ask = false },
-                    confirmButton = { TextButton({ ask = false
-                        if (mode == "live") act.confirmUser("Close LIVE short ${p.symbol}") { vm.shortClose(p.symbol) } else vm.shortClose(p.symbol)
-                    }) { Text("Close at market", color = C.Red) } },
-                    dismissButton = { TextButton({ ask = false }) { Text("Keep") } },
-                    title = { Text("Close ${p.symbol} short?") }, text = { Text("Buys back the short at market and removes its SL/TP.") },
-                    containerColor = C.Panel)
-            }
-            Gap(6.dp)
-        }
-        item { SectionTitle(if (c.pumpAuto) "Pumped coins (auto-shorted on SIGNAL)" else "Pumped coins (tap Short to open)") }
+        item { SectionTitle("Pumped coins") }
         val pumps = v?.pumps ?: emptyList()
         if (pumps.isEmpty()) item { T("-", 13.sp, C.Muted) }
         for (p in pumps) item(key = "p" + p.symbol) {
@@ -174,8 +192,9 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
                 T("${sgn1(p.ch24)}%", 12.sp, pnlColor(p.ch24), modifier = Modifier.weight(0.8f))
                 T("1d ${sgn1(p.d1)}%", 11.sp, C.Muted, modifier = Modifier.weight(0.9f))
                 T("3d ${sgn1(p.d3)}%", 11.sp, C.Muted, modifier = Modifier.weight(0.9f))
-                T(String.format(Locale.US, "%+.3f%%", p.fundingPct), 11.sp, if (p.fundingPct < 0) C.Red else C.Muted, modifier = Modifier.weight(0.9f))
-                if (p.status != "-") Pill(p.status, if (p.status == "SIGNAL") C.Amber else C.Muted)
+                val fv = p.fundingAvgPct ?: p.fundingPct
+                T(String.format(Locale.US, "%+.3f%%", fv), 11.sp, if (fv < 0) C.Red else C.Muted, modifier = Modifier.weight(0.9f))
+                if (p.status != "-") Pill(p.status, when (p.status) { "SIGNAL" -> C.Amber; "LOW FUNDING" -> C.Red; else -> C.Muted })
             }
             val isOpen = v?.state?.open?.containsKey(p.symbol) == true
             if (p.status != "-" && !isOpen) Row(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
@@ -183,45 +202,89 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
             }
         }
         item {
-            T("Negative funding = shorts pay longs. SIGNAL = pumped +50% in a day or +100% in 3 days (and listed 30+ days). " +
-                "Pump shorts use SL +${c.pumpSlPct.toInt()}%, TP −${c.pumpTpPct.toInt()}%, ${c.pumpHoldDays}-day hold. Warning: this rule lost 2–3% per trade in the 2026 backtest, with single trades down 70%+.",
-                11.sp, C.Dim)
-            SectionTitle("Closed shorts")
+            T("SIGNAL = pumped +50% in a day or +100% in 3 days, listed 30+ days, and (filter on) the last 9 funding rates average at least " +
+                "+${String.format(Locale.US, "%.2f", c.pumpMinFunding)}% so longs pay the short. LOW FUNDING = pumped but skipped.", 11.sp, C.Dim)
+            SectionTitle("Binance announcements (last ones)")
         }
+        val ann = v?.announcements ?: emptyList()
+        if (ann.isEmpty()) item { T("No delisting / monitoring-tag announcement naming a futures coin right now.", 13.sp, C.Muted) }
+        for (a in ann.take(15)) item(key = "a" + a.kind + a.symbol) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    T("${a.symbol} · ${a.kind}", 12.sp, C.Txt, FontWeight.SemiBold)
+                    T("${dayHhmm(a.time)} · ${a.title}", 10.sp, C.Muted, maxLines = 2)
+                }
+                val fresh = System.currentTimeMillis() - a.time < 86_400_000L
+                Pill(if (fresh) "≤24h" else "old", if (fresh) C.Amber else C.Muted)
+            }
+        }
+        item { SectionTitle("Closed shorts and hedges") }
         val jr = v?.journal ?: emptyList()
-        if (jr.isEmpty()) item { T("No closed shorts yet.", 13.sp, C.Muted) }
-        for ((i, t) in jr.take(100).withIndex()) item(key = "j$i") {
+        if (jr.isEmpty()) item { T("No closed trades yet.", 13.sp, C.Muted) }
+        for ((i, t) in jr.take(150).withIndex()) item(key = "j$i") {
             Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    T(t.symbol, 13.sp, C.Txt, FontWeight.SemiBold)
+                    T(t.symbol + if (t.rule.isNotEmpty()) " · ${t.rule}" else "", 13.sp, C.Txt, FontWeight.SemiBold, maxLines = 1)
                     T("${dayHhmm(t.opened)} → ${dayHhmm(t.closed)} · ${t.reason}", 11.sp, C.Muted)
                 }
                 Column(horizontalAlignment = Alignment.End) {
-                    T(sgn2(t.pnl), 13.sp, pnlColor(t.pnl), FontWeight.Bold)
+                    T((if (t.pnl >= 0) "Profit " else "Loss ") + "${sgn2(t.pnl)} USDT", 13.sp, pnlColor(t.pnl), FontWeight.Bold)
                     t.retPct?.let { T("${sgn1(it)}% margin", 11.sp, pnlColor(it)) }
                 }
             }
         }
         item {
-            SectionTitle("Settings")
-            Stepper("Margin per short", "${c.marginPct.toInt()}% of equity", "Binance needs 5+ USDT per position",
-                onMinus = { vm.saveShortCfg(c.copy(marginPct = (c.marginPct - 1).coerceAtLeast(1.0))) },
-                onPlus = { vm.saveShortCfg(c.copy(marginPct = (c.marginPct + 1).coerceAtMost(50.0))) })
-            Stepper("Leverage", "${c.leverage}x", "Keep 1x: a +40% squeeze liquidates 3x",
-                onMinus = { vm.saveShortCfg(c.copy(leverage = (c.leverage - 1).coerceAtLeast(1))) },
-                onPlus = { vm.saveShortCfg(c.copy(leverage = (c.leverage + 1).coerceAtMost(3))) })
+            SectionTitle("Size and risk (tap a number to type any value)")
+            Stepper("Margin per short", "${pctTxt(c.marginPct)}% of equity", "Binance needs 5+ USDT per position (100+ USDT for a BTC hedge)",
+                onMinus = { save(c.copy(marginPct = (c.marginPct - 1).coerceAtLeast(0.5))) },
+                onPlus = { save(c.copy(marginPct = (c.marginPct + 1).coerceAtMost(100.0))) },
+                onSet = { save(c.copy(marginPct = it.coerceIn(0.1, 100.0))) })
+            Stepper("Leverage", "${c.leverage}x", "At 1x a +40% squeeze costs 40% of the margin; at 3x it liquidates",
+                onMinus = { save(c.copy(leverage = (c.leverage - 1).coerceAtLeast(1))) },
+                onPlus = { save(c.copy(leverage = (c.leverage + 1).coerceAtMost(125))) },
+                onSet = { save(c.copy(leverage = it.toInt().coerceIn(1, 125))) })
             Stepper("Max open shorts", "${c.maxPositions}",
-                onMinus = { vm.saveShortCfg(c.copy(maxPositions = (c.maxPositions - 1).coerceAtLeast(1))) },
-                onPlus = { vm.saveShortCfg(c.copy(maxPositions = (c.maxPositions + 1).coerceAtMost(20))) })
+                onMinus = { save(c.copy(maxPositions = (c.maxPositions - 1).coerceAtLeast(1))) },
+                onPlus = { save(c.copy(maxPositions = c.maxPositions + 1)) },
+                onSet = { save(c.copy(maxPositions = it.toInt().coerceAtLeast(1))) })
+            SectionTitle("Rule settings")
+            Stepper("Listing: short on day", "${c.entryDay}", onMinus = { save(c.copy(entryDay = (c.entryDay - 1).coerceAtLeast(1))) },
+                onPlus = { save(c.copy(entryDay = c.entryDay + 1)) }, onSet = { save(c.copy(entryDay = it.toInt().coerceAtLeast(1))) })
+            Stepper("Listing: stop-loss", "+${pctTxt(c.slPct)}%", onMinus = { save(c.copy(slPct = (c.slPct - 5).coerceAtLeast(5.0))) },
+                onPlus = { save(c.copy(slPct = c.slPct + 5)) }, onSet = { save(c.copy(slPct = it.coerceAtLeast(1.0))) })
+            Stepper("Listing: take-profit", "−${pctTxt(c.tpPct)}%", onMinus = { save(c.copy(tpPct = (c.tpPct - 5).coerceAtLeast(5.0))) },
+                onPlus = { save(c.copy(tpPct = (c.tpPct + 5).coerceAtMost(95.0))) }, onSet = { save(c.copy(tpPct = it.coerceIn(1.0, 99.0))) })
+            Stepper("Listing: hold days", "${c.holdDays}", onMinus = { save(c.copy(holdDays = (c.holdDays - 1).coerceAtLeast(1))) },
+                onPlus = { save(c.copy(holdDays = c.holdDays + 1)) }, onSet = { save(c.copy(holdDays = it.toInt().coerceAtLeast(1))) })
+            Stepper("Pump: min avg funding", if (c.fundingFilterOn) "+${String.format(Locale.US, "%.2f", c.pumpMinFunding)}%" else "off",
+                "Backtest: +0.03% kept the pump short positive in 2026. Type -1 to switch the filter off.",
+                onMinus = { save(c.copy(pumpMinFunding = Math.round((c.pumpMinFunding - 0.01) * 100) / 100.0)) },
+                onPlus = { save(c.copy(pumpMinFunding = Math.round((c.pumpMinFunding + 0.01) * 100) / 100.0)) },
+                onSet = { save(c.copy(pumpMinFunding = it)) })
+            Stepper("Pump: stop-loss", "+${pctTxt(c.pumpSlPct)}%", onMinus = { save(c.copy(pumpSlPct = (c.pumpSlPct - 5).coerceAtLeast(5.0))) },
+                onPlus = { save(c.copy(pumpSlPct = c.pumpSlPct + 5)) }, onSet = { save(c.copy(pumpSlPct = it.coerceAtLeast(1.0))) })
+            Stepper("Pump: take-profit", "−${pctTxt(c.pumpTpPct)}%", onMinus = { save(c.copy(pumpTpPct = (c.pumpTpPct - 5).coerceAtLeast(5.0))) },
+                onPlus = { save(c.copy(pumpTpPct = (c.pumpTpPct + 5).coerceAtMost(95.0))) }, onSet = { save(c.copy(pumpTpPct = it.coerceIn(1.0, 99.0))) })
+            Stepper("Scale-in: add 2nd half at", "+${pctTxt(c.scaleAddPct)}%", onMinus = { save(c.copy(scaleAddPct = (c.scaleAddPct - 5).coerceAtLeast(5.0))) },
+                onPlus = { save(c.copy(scaleAddPct = c.scaleAddPct + 5)) }, onSet = { save(c.copy(scaleAddPct = it.coerceAtLeast(1.0))) })
+            Stepper("Scale-in: stop for both halves", "+${pctTxt(c.scaleStopPct)}%", onMinus = { save(c.copy(scaleStopPct = (c.scaleStopPct - 5).coerceAtLeast(10.0))) },
+                onPlus = { save(c.copy(scaleStopPct = c.scaleStopPct + 5)) }, onSet = { save(c.copy(scaleStopPct = it.coerceAtLeast(2.0))) })
+            Stepper("Announcement: stop-loss", "+${pctTxt(c.annSlPct)}%", onMinus = { save(c.copy(annSlPct = (c.annSlPct - 5).coerceAtLeast(5.0))) },
+                onPlus = { save(c.copy(annSlPct = c.annSlPct + 5)) }, onSet = { save(c.copy(annSlPct = it.coerceAtLeast(1.0))) })
+            Stepper("Announcement: take-profit", "−${pctTxt(c.annTpPct)}%", onMinus = { save(c.copy(annTpPct = (c.annTpPct - 5).coerceAtLeast(5.0))) },
+                onPlus = { save(c.copy(annTpPct = (c.annTpPct + 5).coerceAtMost(95.0))) }, onSet = { save(c.copy(annTpPct = it.coerceIn(1.0, 99.0))) })
+            Stepper("Announcement: hold days", "${c.annHoldDays}", onMinus = { save(c.copy(annHoldDays = (c.annHoldDays - 1).coerceAtLeast(1))) },
+                onPlus = { save(c.copy(annHoldDays = c.annHoldDays + 1)) }, onSet = { save(c.copy(annHoldDays = it.toInt().coerceAtLeast(1))) })
             val eq = if (mode == "paper") v?.state?.paperEquity ?: c.paperStart else null
             val need = kotlin.math.ceil(5.0 / (c.marginPct / 100 * c.leverage)).toInt()
             Gap(6.dp)
-            T("Each short = ${c.marginPct.toInt()}% of equity × ${c.leverage}x, SL +${c.slPct.toInt()}%, TP −${c.tpPct.toInt()}%, closed after ${c.holdDays} days. " +
-                "You need at least $need USDT equity" + (eq?.let { " (paper: ${f2(it)})" } ?: "") + ". The rule is checked every 15 minutes in the background.", 11.sp, C.Muted)
-            SectionTitle("When does it make money?")
-            T("Backtest on 262 new Binance coins (Mar 2025 – Oct 2026), after fees and funding: +4.3% per trade on average, 64% winners, " +
-                "+78% in 19 months at 10% per trade and 1x, worst drop −36%. It earns when launch hype fades and loses when a new coin is squeezed +40% " +
-                "(about 1 in 3 trades) or in an alt-coin season. New listings slowed in late 2026, so expect few trades. Past results are not a promise.", 12.sp, C.Muted)
+            T("Each short = ${pctTxt(c.marginPct)}% of equity × ${c.leverage}x (half of it first when scale-in is on). You need at least $need USDT equity" +
+                (eq?.let { " (paper: ${f2(it)})" } ?: "") + "; the BTC hedge needs about 100+ USDT per short on Binance.", 11.sp, C.Muted)
+            SectionTitle("Backtest (2021 – Nov 2026, after fees and funding)")
+            T("Listing short day 3 / SL 50 / TP 40 / 21 d: +4.0% per trade in 2021-25 and in 2026. Pump short with funding ≥ +0.03%: +4.5% (2021-25), +3.2% (2026) but −7.3% in 2024. " +
+                "Scale-in, BTC hedge and announcement shorts were positive before 2026 but NEGATIVE in 2026 (−1.0%, −0.4%, −2.8% per trade). " +
+                "10% per short with max 3 open: about +26% a year with a worst drop of −41%. More open positions or more leverage raise both profit and drawdown. Past results are not a promise.",
+                12.sp, C.Muted)
             Gap(24.dp)
         }
     }
@@ -405,24 +468,24 @@ private fun copySettings(vm: AppVM, c: pk.aidesk.app.core.CopyCfg) {
         fun save(n: pk.aidesk.app.core.CopyCfg) = vm.saveCopyCfg(n)
         Stepper("Size multiplier", String.format(Locale.US, "%.1fx", c.sizeMult), "1 = same % of money as the leader",
             onMinus = { save(c.copy(sizeMult = ((c.sizeMult * 10 - 1) / 10).coerceAtLeast(0.1))) },
-            onPlus = { save(c.copy(sizeMult = ((c.sizeMult * 10 + 1) / 10).coerceAtMost(5.0))) })
+            onPlus = { save(c.copy(sizeMult = ((c.sizeMult * 10 + 1) / 10).coerceAtMost(100.0))) })
         Stepper("Max size per copy", "${c.maxNotional.toInt()} USDT", "Position value cap",
             onMinus = { save(c.copy(maxNotional = (c.maxNotional - 5).coerceAtLeast(6.0))) },
-            onPlus = { save(c.copy(maxNotional = (c.maxNotional + 5).coerceAtMost(500.0))) })
+            onPlus = { save(c.copy(maxNotional = (c.maxNotional + 5))) })
         Stepper("Max leverage", "${c.maxLev}x", onMinus = { save(c.copy(maxLev = (c.maxLev - 1).coerceAtLeast(1))) },
-            onPlus = { save(c.copy(maxLev = (c.maxLev + 1).coerceAtMost(20))) })
+            onPlus = { save(c.copy(maxLev = (c.maxLev + 1).coerceAtMost(125))) })
         Stepper("Max open copies", "${c.maxPositions}", "Up to 25 at a time; total exposure cap below still applies",
             onMinus = { save(c.copy(maxPositions = (c.maxPositions - 1).coerceAtLeast(1))) },
-            onPlus = { save(c.copy(maxPositions = (c.maxPositions + 1).coerceAtMost(25))) })
+            onPlus = { save(c.copy(maxPositions = (c.maxPositions + 1).coerceAtMost(500))) })
         Stepper("Max total exposure", String.format(Locale.US, "%.1f× equity", c.maxExposureX),
             onMinus = { save(c.copy(maxExposureX = (c.maxExposureX - 0.5).coerceAtLeast(0.5))) },
-            onPlus = { save(c.copy(maxExposureX = (c.maxExposureX + 0.5).coerceAtMost(10.0))) })
+            onPlus = { save(c.copy(maxExposureX = (c.maxExposureX + 0.5).coerceAtMost(500.0))) })
         Stepper("Emergency stop", "${c.stopPct.toInt()}% move", "Placed on Binance in live, so it works offline", C.Red,
             onMinus = { save(c.copy(stopPct = (c.stopPct - 5).coerceAtLeast(5.0))) },
-            onPlus = { save(c.copy(stopPct = (c.stopPct + 5).coerceAtMost(50.0))) })
+            onPlus = { save(c.copy(stopPct = (c.stopPct + 5).coerceAtMost(100.0))) })
         Stepper("Daily loss limit", "${c.dailyLossPct.toInt()}%", "No new copies for the rest of the UTC day", C.Red,
             onMinus = { save(c.copy(dailyLossPct = (c.dailyLossPct - 1).coerceAtLeast(2.0))) },
-            onPlus = { save(c.copy(dailyLossPct = (c.dailyLossPct + 1).coerceAtMost(50.0))) })
+            onPlus = { save(c.copy(dailyLossPct = (c.dailyLossPct + 1).coerceAtMost(100.0))) })
         Stepper("Check every", "${c.pollSec} s", "Faster = smaller delay, more battery",
             onMinus = { save(c.copy(pollSec = (c.pollSec - 5).coerceAtLeast(5))) },
             onPlus = { save(c.copy(pollSec = (c.pollSec + 5).coerceAtMost(60))) })

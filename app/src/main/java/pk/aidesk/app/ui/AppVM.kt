@@ -180,7 +180,8 @@ class AppVM(app: Application) : AndroidViewModel(app) {
 
     class ShortsView(val cfg: pk.aidesk.app.core.ShortCfg, val listings: List<pk.aidesk.app.core.Listing>,
                      val pumps: List<pk.aidesk.app.core.Pump>, val state: pk.aidesk.app.core.ShortState,
-                     val journal: List<pk.aidesk.app.core.ShortDone>, val at: Long)
+                     val journal: List<pk.aidesk.app.core.ShortDone>, val at: Long,
+                     val announcements: List<pk.aidesk.app.core.Announcement> = emptyList())
     val shorts = MutableStateFlow<ShortsView?>(null)
     val shortsErr = MutableStateFlow<String?>(null)
     val shortsLoading = MutableStateFlow(false)
@@ -193,7 +194,9 @@ class AppVM(app: Application) : AndroidViewModel(app) {
             val v = withContext(Dispatchers.IO) {
                 val lst = if (market || old == null) shortHunter.listings(pub) else old.listings
                 val pm = if (market || old == null) runCatching { shortHunter.pumps(pub) }.getOrDefault(old?.pumps ?: emptyList()) else old.pumps
-                ShortsView(shortHunter.cfg(), lst, pm, shortHunter.state(mode), shortHunter.journal(mode).reversed(), System.currentTimeMillis())
+                val an = if (market || old == null) runCatching { shortHunter.announcements(pub) }.getOrDefault(old?.announcements ?: emptyList())
+                    else old.announcements
+                ShortsView(shortHunter.cfg(), lst, pm, shortHunter.state(mode), shortHunter.journal(mode).reversed(), System.currentTimeMillis(), an)
             }
             shorts.value = v; shortsErr.value = null
         } catch (e: Exception) {
@@ -203,8 +206,8 @@ class AppVM(app: Application) : AndroidViewModel(app) {
 
     fun saveShortCfg(c: pk.aidesk.app.core.ShortCfg) {
         shortHunter.saveCfg(c)
-        shorts.value?.let { shorts.value = ShortsView(c, it.listings, it.pumps, it.state, it.journal, it.at) }
-        if (c.enabled) TraderService.start(getApplication())
+        shorts.value?.let { shorts.value = ShortsView(c, it.listings, it.pumps, it.state, it.journal, it.at, it.announcements) }
+        if (c.enabled || c.pumpAuto || c.annAuto) TraderService.start(getApplication())
     }
 
     class LeaderView(val leader: pk.aidesk.app.core.Leader, val detail: pk.aidesk.app.core.LeadDetail?,
@@ -323,6 +326,25 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         tradeSym.value = null
         analysis.value = null
         openPos.value = null
+    }
+
+    // ------------------------------------------------------------------ closed trades of every bot (Positions tab)
+    class ClosedRow(val symbol: String, val side: String, val source: String, val closed: Long, val pnl: Double, val reason: String)
+    val closedAll = MutableStateFlow<List<ClosedRow>>(emptyList())
+
+    fun loadClosedAll() = viewModelScope.launch {
+        val mode = config.value.mode
+        closedAll.value = withContext(Dispatchers.IO) {
+            val a = store.journal(mode).filter { it.status == "closed" && it.pnl != null }.map {
+                ClosedRow(it.symbol, it.side, if (it.origin == "manual") "manual" else "AI ${it.origin}", it.exitMs ?: it.openedMs, it.pnl!!, it.reason ?: "")
+            }
+            val b = shortHunter.journal(mode).map {
+                ClosedRow(it.symbol, if (it.rule == "btc hedge") "LONG" else "SHORT", if (it.rule == "btc hedge") "btc hedge" else "short hunter",
+                    it.closed, it.pnl, it.reason)
+            }
+            val c = copyBot.journal(mode).map { ClosedRow(it.symbol, it.side, "copy ${it.leader}", it.closed, it.pnl, it.reason) }
+            (a + b + c).sortedByDescending { it.closed }
+        }
     }
 
     // ------------------------------------------------------------------ TA-course signals (4h divergence / range fade)

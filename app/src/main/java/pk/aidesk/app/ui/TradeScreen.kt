@@ -1,4 +1,4 @@
-package pk.aidesk.app.ui
+﻿package pk.aidesk.app.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -159,7 +159,7 @@ private fun CoinView(vm: AppVM, act: MainActivity, sym: String) {
     val live by vm.livePx.collectAsState()
     val pos by vm.openPos.collectAsState()
     var askClose by remember { mutableStateOf(false) }
-    val ticket = remember(sym) { TicketState(cfg.leverage.coerceIn(1, 20)) }
+    val ticket = remember(sym) { TicketState(cfg.leverage.coerceIn(1, 125)) }
     DisposableEffect(sym) { onDispose { vm.stopAnalysis() } }
     val taList by vm.taSignals.collectAsState()
     LaunchedEffect(sym) { vm.loadManual(); vm.loadTa() }
@@ -400,9 +400,10 @@ private fun TicketCard(vm: AppVM, act: MainActivity, sym: String, t: TicketState
         Gap(4.dp)
         Stepper("Risk if stopped", String.format(Locale.US, "%.1f%% of equity", t.risk), "Size is worked out from this and the stop distance",
             onMinus = { t.risk = (t.risk - if (t.risk > 2) 1.0 else 0.5).coerceAtLeast(0.5) },
-            onPlus = { t.risk = (t.risk + if (t.risk >= 2) 1.0 else 0.5).coerceAtMost(20.0) })
+            onPlus = { t.risk = (t.risk + if (t.risk >= 2) 1.0 else 0.5).coerceAtMost(100.0) },
+            onSet = { t.risk = it.coerceIn(0.1, 100.0) })
         Stepper("Leverage", "${t.lev}x", "Margin = position ÷ leverage (isolated)",
-            onMinus = { t.lev = (t.lev - 1).coerceAtLeast(1) }, onPlus = { t.lev = (t.lev + 1).coerceAtMost(50) })
+            onMinus = { t.lev = (t.lev - 1).coerceAtLeast(1) }, onPlus = { t.lev = (t.lev + 1).coerceAtMost(125) }, onSet = { t.lev = it.toInt().coerceIn(1, 125) })
         if (t.type != "MARKET") Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Valid for", 12.sp, C.Muted)
             for (h in listOf(4, 24, 72)) Pill("${h}h", if (t.hours == h) C.Blue else C.Muted, filled = t.hours == h) { t.hours = h }

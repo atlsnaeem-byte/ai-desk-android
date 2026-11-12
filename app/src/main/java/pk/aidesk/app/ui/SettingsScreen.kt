@@ -1,4 +1,4 @@
-package pk.aidesk.app.ui
+﻿package pk.aidesk.app.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -84,13 +84,25 @@ internal fun LinkRow(label: String, value: String, color: Color = C.Txt, onClick
     }
 }
 
+/** − value + row. With [onSet], tapping the value lets you type any number (validated by the caller). */
 @Composable
-internal fun Stepper(label: String, value: String, sub: String? = null, color: Color = C.Txt, onMinus: () -> Unit, onPlus: () -> Unit) = RowBox {
+internal fun Stepper(label: String, value: String, sub: String? = null, color: Color = C.Txt, onMinus: () -> Unit, onPlus: () -> Unit,
+                     onSet: ((Double) -> Unit)? = null) = RowBox {
+    var edit by remember { mutableStateOf(false) }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) { T(label, 14.sp); sub?.let { T(it, 11.sp, C.Muted) } }
         Pill("  -  ", C.Muted, onClick = onMinus); HGap(10.dp)
-        T(value, 14.sp, color, FontWeight.Bold); HGap(10.dp)
+        T(value, 14.sp, color, FontWeight.Bold, modifier = if (onSet != null) Modifier.clickable { edit = true } else Modifier); HGap(10.dp)
         Pill("  +  ", C.Muted, onClick = onPlus)
+    }
+    if (edit && onSet != null) {
+        var txt by remember { mutableStateOf(value.filter { it.isDigit() || it == '.' }) }
+        AlertDialog(onDismissRequest = { edit = false }, containerColor = C.Panel,
+            title = { Text(label) },
+            text = { OutlinedTextField(txt, { txt = it.filter { c -> c.isDigit() || c == '.' } }, singleLine = true, colors = fieldColors(),
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal)) },
+            confirmButton = { TextButton({ txt.toDoubleOrNull()?.let { onSet(it) }; edit = false }, enabled = txt.toDoubleOrNull() != null) { Text("Set") } },
+            dismissButton = { TextButton({ edit = false }) { Text("Cancel") } })
     }
 }
 
@@ -166,12 +178,15 @@ fun SettingsScreen(vm: AppVM, act: MainActivity) {
                     "Default +0.15R (backtested). Lower = more trades with a thinner edge; higher = fewer, stronger trades.") {
                 save(vm.config.value.copy(minEvR = Math.round(it * 20) / 20.0))
             }
-            SliderRow("Risk per trade", cfg.riskPct.toFloat(), 1f..50f, 48, { "${it.toInt()}%" }, C.Amber,
-                "Share of equity lost if the stop-loss is hit." + if (cfg.riskPct > cfg.dailyLossPct) " Above your daily loss limit: one loss pauses auto for the day." else "") {
-                save(vm.config.value.copy(riskPct = it.toInt().toDouble()))
-            }
-            Stepper("Leverage", "${cfg.leverage}x", "Applied on Binance at the next scan", onMinus = { save(cfg.copy(leverage = (cfg.leverage - 1).coerceAtLeast(1))) },
-                onPlus = { save(cfg.copy(leverage = (cfg.leverage + 1).coerceAtMost(50))) })
+            Stepper("Risk per trade", "${pctTxt(cfg.riskPct)}%", "Share of equity lost if the stop-loss is hit. Tap the number to type any value." +
+                if (cfg.riskPct > cfg.dailyLossPct) " Above your daily loss limit: one loss pauses auto for the day." else "", C.Amber,
+                onMinus = { save(cfg.copy(riskPct = (cfg.riskPct - 1).coerceAtLeast(0.1))) },
+                onPlus = { save(cfg.copy(riskPct = (cfg.riskPct + 1).coerceAtMost(100.0))) },
+                onSet = { save(vm.config.value.copy(riskPct = it.coerceIn(0.1, 100.0))) })
+            Stepper("Leverage", "${cfg.leverage}x", "Applied on Binance at the next scan (Binance max is 125x, less on small coins)",
+                onMinus = { save(cfg.copy(leverage = (cfg.leverage - 1).coerceAtLeast(1))) },
+                onPlus = { save(cfg.copy(leverage = (cfg.leverage + 1).coerceAtMost(125))) },
+                onSet = { save(vm.config.value.copy(leverage = it.toInt().coerceIn(1, 125))) })
             RowBox {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     T("Margin type", 14.sp, modifier = Modifier.weight(1f))
@@ -182,13 +197,15 @@ fun SettingsScreen(vm: AppVM, act: MainActivity) {
                 }
             }
             Stepper("Max open positions", "${cfg.maxOpen}", onMinus = { save(cfg.copy(maxOpen = (cfg.maxOpen - 1).coerceAtLeast(1))) },
-                onPlus = { save(cfg.copy(maxOpen = (cfg.maxOpen + 1).coerceAtMost(10))) })
+                onPlus = { save(cfg.copy(maxOpen = cfg.maxOpen + 1)) }, onSet = { save(vm.config.value.copy(maxOpen = it.toInt().coerceAtLeast(1))) })
             Stepper("Daily loss limit", "-${cfg.dailyLossPct}%", "Pauses auto entries until midnight PKT", C.Red,
                 onMinus = { save(cfg.copy(dailyLossPct = (cfg.dailyLossPct - 1).coerceAtLeast(1.0))) },
-                onPlus = { save(cfg.copy(dailyLossPct = (cfg.dailyLossPct + 1).coerceAtMost(50.0))) })
+                onPlus = { save(cfg.copy(dailyLossPct = (cfg.dailyLossPct + 1).coerceAtMost(100.0))) },
+                onSet = { save(vm.config.value.copy(dailyLossPct = it.coerceIn(0.5, 100.0))) })
             Stepper("Daily profit target", "+${cfg.dailyProfitPct}%", "Pauses auto entries when reached", C.Green,
                 onMinus = { save(cfg.copy(dailyProfitPct = (cfg.dailyProfitPct - 1).coerceAtLeast(1.0))) },
-                onPlus = { save(cfg.copy(dailyProfitPct = (cfg.dailyProfitPct + 1).coerceAtMost(200.0))) })
+                onPlus = { save(cfg.copy(dailyProfitPct = cfg.dailyProfitPct + 1)) },
+                onSet = { save(vm.config.value.copy(dailyProfitPct = it.coerceAtLeast(0.5))) })
 
             SectionTitle("Binance")
             LinkRow("API key", vm.engine.store.keyHint("live")?.let { "live $it" } ?: "not set", if (vm.engine.store.keyHint("live") != null) C.Green else C.Amber) { vm.page.value = "apikey" }
@@ -357,7 +374,6 @@ fun SetupScreen(vm: AppVM, act: MainActivity) {
         Triple("Notifications allowed", "needed for alerts and trade reports", notifOk(ctx)),
         Triple("Battery: unrestricted", "so Android does not stop the scanner", batteryOk(ctx)),
         Triple("Exact alarms", "wake at each 15-minute close", alarmsOk(ctx)),
-        Triple("Binance API key", "optional now; needed for LIVE", vm.engine.store.keyHint("live") != null),
     )
     var keyPage by remember { mutableStateOf(false) }
     if (keyPage) {
@@ -392,10 +408,12 @@ fun SetupScreen(vm: AppVM, act: MainActivity) {
             }
         }
         Box(Modifier.weight(1f))
-        T("You start in PAPER mode with auto off. Switch to LIVE in Settings when ready.", 12.sp, C.Muted)
+        T("You start in PAPER mode: no API key needed. Add your Binance API key later in Settings > API key, only when you switch to LIVE.", 12.sp, C.Muted)
         Gap(8.dp)
         Btn("Start AI Desk", C.Green, enabled = steps[0].third || Build.VERSION.SDK_INT < 33) { vm.finishSetup() }
         Gap(4.dp)
         if (!steps[1].third || !steps[2].third) T("Without unrestricted battery and exact alarms, scans can be late or skipped.", 11.sp, C.Amber)
     }
 }
+
+internal fun pctTxt(v: Double): String = if (v == Math.floor(v)) v.toInt().toString() else String.format(Locale.US, "%.2f", v).trimEnd('0').trimEnd('.')

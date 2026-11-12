@@ -259,7 +259,10 @@ class Store(ctx: Context) {
     /** Symbols the Short Hunter / Copy bots hold in this mode -> owner label. The AI engine leaves them alone. */
     fun botSymbols(mode: String): Map<String, String> {
         val out = linkedMapOf<String, String>()
-        readObj("shorts_state_$mode.json")?.optJSONObject("open")?.keys()?.forEach { out[it] = "short hunter" }
+        readObj("shorts_state_$mode.json")?.let { st ->
+            st.optJSONObject("open")?.keys()?.forEach { out[it] = "short hunter" }
+            if (st.optDouble("hedgeQty", 0.0) > 0) out["BTCUSDT"] = "btc hedge"
+        }
         readArr("manual_$mode.json")?.let { a ->
             for (i in 0 until a.length()) a.optJSONObject(i)?.let { o ->
                 if (o.optString("status") in setOf("pending", "open")) out[o.getString("symbol")] = "manual"

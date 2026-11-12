@@ -52,7 +52,9 @@ fun PositionsScreen(vm: AppVM) {
     val err by vm.accountError.collectAsState()
     val logs by vm.logs.collectAsState()
     var confirm by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(Unit) { vm.loadLogs(); vm.refreshAccount() }
+    val closed by vm.closedAll.collectAsState()
+    LaunchedEffect(Unit) { vm.loadLogs(); vm.refreshAccount(); vm.loadClosedAll() }
+    LaunchedEffect(acc) { vm.loadClosedAll() }
     val now = rememberNow()
 
     Column(Modifier.fillMaxSize()) {
@@ -87,11 +89,46 @@ fun PositionsScreen(vm: AppVM) {
                 }
                 err?.let { Gap(8.dp); T(it, 13.sp, C.Amber) }
                 Gap(10.dp)
-                if (acc != null && acc!!.positions.isEmpty()) T("No open positions.", 14.sp, C.Muted, modifier = Modifier.padding(8.dp))
+                // absolute totals: open (unrealised) and closed (realised) across every bot
+                val ps = acc?.positions ?: emptyList()
+                val openPnl = ps.sumOf { it.upnl }
+                val dayStart = java.time.LocalDate.now(pk.aidesk.app.core.Engine.PKT).atStartOfDay(pk.aidesk.app.core.Engine.PKT).toInstant().toEpochMilli()
+                val today = closed.filter { it.closed >= dayStart }.sumOf { it.pnl }
+                val allClosed = closed.sumOf { it.pnl }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for ((k, v) in listOf("Open P&L" to openPnl, "Closed today" to today, "Closed total" to allClosed)) {
+                        Column(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).background(C.Panel).padding(vertical = 8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally) {
+                            T(k, 10.sp, C.Muted)
+                            T("${sgn2(v)} USDT", 14.sp, if (v >= 0) C.Green else C.Red, FontWeight.Bold, maxLines = 1)
+                        }
+                    }
+                }
+                Gap(10.dp)
+                T("Open positions (${ps.size})", 14.sp, C.Txt, FontWeight.Bold)
+                Gap(4.dp)
+                if (acc != null && ps.isEmpty()) T("No open positions.", 14.sp, C.Muted, modifier = Modifier.padding(8.dp))
             }
             items(acc?.positions ?: emptyList(), key = { it.symbol + "|" + it.origin }) { p ->
                 PositionCard(p, cfg, now, onOpen = { vm.showChart(p.symbol) }) { confirm = p.symbol }
                 Gap(8.dp)
+            }
+            item {
+                Gap(8.dp)
+                T("Closed trades (${closed.size}) · ${closed.count { it.pnl > 0 }} profit / ${closed.count { it.pnl <= 0 }} loss", 14.sp, C.Txt, FontWeight.Bold)
+                Gap(4.dp)
+                if (closed.isEmpty()) T("No closed trades yet.", 13.sp, C.Muted)
+            }
+            items(closed.take(100)) { t ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            T(t.symbol, 13.sp, C.Txt, FontWeight.SemiBold); HGap(6.dp); Pill(t.side, C.side(t.side))
+                        }
+                        T("${t.source} · ${dayHhmm(t.closed)} · ${t.reason}", 11.sp, C.Muted, maxLines = 1)
+                    }
+                    T((if (t.pnl >= 0) "Profit " else "Loss ") + "${sgn2(t.pnl)} USDT", 13.sp, if (t.pnl >= 0) C.Green else C.Red, FontWeight.Bold)
+                }
             }
             item {
                 Gap(8.dp)
@@ -128,7 +165,7 @@ private fun PositionCard(p: Position, cfg: Config, now: Long, onOpen: () -> Unit
             if (p.origin != "auto") { HGap(6.dp); Pill(p.origin, if (p.origin == "external") C.Muted else C.Amber) }
             Box(Modifier.weight(1f))
             Column(horizontalAlignment = Alignment.End) {
-                T("${sgn2(p.upnl)} USDT", 15.sp, if (p.upnl >= 0) C.Green else C.Red, FontWeight.Bold)
+                T((if (p.upnl >= 0) "Profit " else "Loss ") + "${sgn2(p.upnl)} USDT", 15.sp, if (p.upnl >= 0) C.Green else C.Red, FontWeight.Bold)
                 r?.let { T("${sgn2(it)}R", 12.sp, if (it >= 0) C.Green else C.Red, FontWeight.SemiBold) }
             }
         }

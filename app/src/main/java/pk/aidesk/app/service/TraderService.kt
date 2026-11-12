@@ -188,7 +188,8 @@ class TraderService : Service() {
             val api = engine.client(c)
             api.syncTime()
             val sh = ShortHunter(engine.store)
-            if (!sh.cfg().enabled && !sh.cfg().pumpAuto && sh.state(c.mode).open.isEmpty()) return
+            val sc = sh.cfg()
+            if (!sc.enabled && !sc.pumpAuto && !sc.annAuto && sh.state(c.mode).open.isEmpty()) return
             sh.step(c.mode, api) { api.equity() }.forEach { Notifier.event(this, engine, it) }
         } catch (e: Exception) {
             engine.store.log("ERROR", "Short hunter: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")

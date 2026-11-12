@@ -186,6 +186,12 @@ class Binance(private val key: String? = null, private val secret: String? = nul
         (0 until a.length()).sumOf { a.getJSONObject(it).getString("fundingRate").toDouble() }
     }.getOrDefault(0.0)
 
+    /** Average of the last [n] funding rates (fraction per period), null if unknown. */
+    fun fundingAvg(symbol: String, n: Int = 9): Double? = runCatching {
+        val a = get("/fapi/v1/fundingRate", mapOf("symbol" to symbol, "limit" to n)) as JSONArray
+        if (a.length() < n) null else (0 until a.length()).sumOf { a.getJSONObject(it).getString("fundingRate").toDouble() } / a.length()
+    }.getOrNull()
+
     fun filters(symbol: String): Filters {
         val m = exchangeInfo()
         val fs = m[symbol]?.getJSONArray("filters") ?: throw BinanceException(0, null, "Unknown symbol $symbol")
