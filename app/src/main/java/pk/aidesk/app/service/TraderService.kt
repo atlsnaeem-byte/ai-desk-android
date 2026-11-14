@@ -27,6 +27,7 @@ import pk.aidesk.app.core.Config
 import pk.aidesk.app.core.CopyBot
 import pk.aidesk.app.core.Engine
 import pk.aidesk.app.core.ManualDesk
+import pk.aidesk.app.core.PumpHunter
 import pk.aidesk.app.core.ShortHunter
 import pk.aidesk.app.core.TaScanner
 import pk.aidesk.app.core.UserError
@@ -49,6 +50,7 @@ class TraderService : Service() {
         val copyTicks = MutableStateFlow(0L)
         const val ACTION_COPY = "pk.aidesk.COPY"
         const val ACTION_MANUAL = "pk.aidesk.MANUAL"
+        const val ACTION_PUMPS = "pk.aidesk.PUMPS"
         /** Bumped after every manual-order watch. */
         val manualTicks = MutableStateFlow(0L)
         val running = MutableStateFlow(false)
@@ -94,6 +96,7 @@ class TraderService : Service() {
             ACTION_CYCLE -> runCycle()
             ACTION_COPY -> { copyBot.resetBaseline(); ensureCopyLoop() }
             ACTION_MANUAL -> ensureManualLoop()
+            ACTION_PUMPS -> { ensurePumpLoop(); runCycle() }
             else -> { // start / restart: catch up if the last scan is from an earlier bar
                 val bar = System.currentTimeMillis() / Config.BAR_MS * Config.BAR_MS
                 if (engine.store.lastCycle < bar + 8_000) runCycle() else schedule()
@@ -101,6 +104,7 @@ class TraderService : Service() {
         }
         ensureCopyLoop()
         ensureManualLoop()
+        ensurePumpLoop()
         return START_STICKY
     }
 
@@ -172,6 +176,7 @@ class TraderService : Service() {
                     if (it is UserError) Notifier.problem(this@TraderService, msg)
                 }
                 runShortHunter()
+                runPumpHunter()
                 runTaScan()
             } finally {
                 ticks.value = System.currentTimeMillis()
@@ -194,6 +199,61 @@ class TraderService : Service() {
             sh.step(c.mode, api) { api.equity() }.forEach { Notifier.event(this, engine, it) }
         } catch (e: Exception) {
             engine.store.log("ERROR", "Short hunter: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    /** Pump Hunter: exits + daily base-breakout scan/entries once per 15-minute cycle (the scan itself runs once a day). */
+    private fun runPumpHunter() {
+        try {
+            val c = engine.cfg()
+            val ph = PumpHunter(engine.store)
+            val pc = ph.cfg()
+            if (!pc.enabled && ph.state(c.mode).open.isEmpty()) {
+                // signals only: keep the daily breakout list fresh for the Signals tab
+                runCatching { ph.breakouts(Binance().also { it.syncTime() }) }
+                return
+            }
+            val api = engine.client(c)
+            api.syncTime()
+            ph.step(c.mode, api) { api.equity() }.forEach { Notifier.event(this, engine, it) }
+            ensurePumpLoop()
+        } catch (e: Exception) {
+            engine.store.log("ERROR", "Pump hunter: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    // ------------------------------------------------------------------ pump hunter: listing-news loop
+    private var pumpJob: Job? = null
+    private var pumpWl: PowerManager.WakeLock? = null
+
+    /** Every 15 s while an Upbit / Binance listing rule is on: a fresh post is traded within seconds, not at the next 15-min cycle. */
+    fun ensurePumpLoop() {
+        if (pumpJob?.isActive == true) return
+        pumpJob = scope.launch {
+            val ph = PumpHunter(engine.store)
+            var lastErr: String? = null
+            var synced = 0L
+            while (isActive) {
+                if (!ph.cfg().newsOn) break
+                val wl = pumpWl ?: (getSystemService(POWER_SERVICE) as PowerManager)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aidesk:pumps").apply { setReferenceCounted(false) }.also { pumpWl = it }
+                wl.acquire(5 * 60_000L)
+                try {
+                    val c = engine.cfg()
+                    val api = engine.client(c)
+                    if (System.currentTimeMillis() - synced > 300_000) { api.syncTime(); synced = System.currentTimeMillis() }
+                    val ev = ph.newsStep(c.mode, api) { api.equity() }
+                    ev.forEach { Notifier.event(this@TraderService, engine, it) }
+                    if (ev.isNotEmpty()) ticks.value = System.currentTimeMillis()
+                    lastErr = null
+                } catch (e: Exception) {
+                    val m = (e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName
+                    if (m != lastErr) engine.store.log("ERROR", "Pump hunter news loop: $m")
+                    lastErr = m
+                }
+                delay(15_000)
+            }
+            pumpWl?.let { if (it.isHeld) it.release() }
         }
     }
 
@@ -307,6 +367,7 @@ class TraderService : Service() {
     override fun onDestroy() {
         copyWl?.let { if (it.isHeld) it.release() }
         manualWl?.let { if (it.isHeld) it.release() }
+        pumpWl?.let { if (it.isHeld) it.release() }
         instance = null
         running.value = false
         scope.cancel()

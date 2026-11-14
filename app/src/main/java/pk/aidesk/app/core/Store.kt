@@ -263,6 +263,7 @@ class Store(ctx: Context) {
             st.optJSONObject("open")?.keys()?.forEach { out[it] = "short hunter" }
             if (st.optDouble("hedgeQty", 0.0) > 0) out["BTCUSDT"] = "btc hedge"
         }
+        readObj("pumps_state_$mode.json")?.optJSONObject("open")?.keys()?.forEach { out[it] = "pump hunter" }
         readArr("manual_$mode.json")?.let { a ->
             for (i in 0 until a.length()) a.optJSONObject(i)?.let { o ->
                 if (o.optString("status") in setOf("pending", "open")) out[o.getString("symbol")] = "manual"

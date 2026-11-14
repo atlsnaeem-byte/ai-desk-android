@@ -43,10 +43,210 @@ fun BotsScreen(vm: AppVM, act: MainActivity) {
         TopBar(vm, "Bots")
         Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Pill("Short hunter", if (sub == "shorts") C.Blue else C.Muted, filled = sub == "shorts") { vm.botTab.value = "shorts" }
+            Pill("Pump hunter", if (sub == "pumps") C.Blue else C.Muted, filled = sub == "pumps") { vm.botTab.value = "pumps" }
             Pill("Copy trade", if (sub == "copy") C.Blue else C.Muted, filled = sub == "copy") { vm.botTab.value = "copy" }
         }
         Gap(6.dp)
-        if (sub == "copy") CopyPane(vm, act) else ShortsPane(vm, act)
+        when (sub) {
+            "copy" -> CopyPane(vm, act)
+            "pumps" -> PumpsPane(vm, act)
+            else -> ShortsPane(vm, act)
+        }
+    }
+}
+
+// ================================================================== Pump hunter (LONG)
+@Composable
+private fun PumpsPane(vm: AppVM, act: MainActivity) {
+    val cfgApp by vm.config.collectAsState()
+    val v by vm.pumps.collectAsState()
+    val err by vm.pumpsErr.collectAsState()
+    val loading by vm.pumpsLoading.collectAsState()
+    LaunchedEffect(cfgApp.mode) { vm.loadPumps(true) }
+    LaunchedEffect(Unit) { while (true) { delay(30_000); vm.loadPumps(false) } }
+    LaunchedEffect(Unit) { while (true) { vm.refreshMarks(); delay(15_000) } }
+    val marks by vm.marks.collectAsState()
+    val c = v?.cfg ?: vm.pumpHunter.cfg()
+    val mode = cfgApp.mode
+    fun save(n: pk.aidesk.app.core.PumpCfg, msg: String? = null) { vm.savePumpCfg(n); msg?.let { vm.toast.value = it } }
+
+    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+        item {
+            T("LONG bot for pumps (${mode.uppercase()}). Base breakouts are checked once a day after the 05:00 PKT daily close; " +
+                "listing news is checked every 15 s while a news rule is on. Own wallet and journal, separate from the Short hunter.", 11.sp, C.Muted)
+            Gap(6.dp)
+            EnableRow("Pump hunter", if (c.enabled) "ON · max ${c.maxPositions} longs · ${pctTxt(c.marginPct)}% each × ${c.leverage}x" else "OFF · signals only",
+                c.enabled, mode, act) { save(c.copy(enabled = it), if (it) "Pump hunter on (${mode.uppercase()})" else "Pump hunter off. Open longs keep their SL/TP.") }
+            Gap(6.dp)
+            EnableRow("1 · Base breakout", "${c.boBaseDays}-day base ≤ ${pctTxt(c.boRangePct)}% range, close above it +${pctTxt(c.boMinDayPct)}–${pctTxt(c.boMaxDayPct)}% " +
+                "on ${pctTxt(c.boVolX)}× volume · SL −${pctTxt(c.boSlPct)}% · TP +${pctTxt(c.boTpPct)}% · ${c.boHoldDays} days", c.breakout, mode, act) {
+                save(c.copy(breakout = it))
+            }
+            Gap(6.dp)
+            EnableRow("2 · Upbit KRW listing", "Long the Binance perp seconds after Upbit adds the coin to KRW · SL −${pctTxt(c.newsSlPct)}% · TP +${pctTxt(c.newsTpPct)}% · ${c.newsHoldH} h",
+                c.upbit, mode, act) { save(c.copy(upbit = it)) }
+            Gap(6.dp)
+            EnableRow("3 · Binance spot listing", "Long the perp after Binance announces a spot listing (perp already trading) · same SL / TP",
+                c.binanceSpot, mode, act) { save(c.copy(binanceSpot = it)) }
+            Gap(8.dp)
+            val st = v?.state; val jr = v?.journal ?: emptyList()
+            val pnl = jr.sumOf { it.pnl }
+            val openPnl = st?.open?.values?.sumOf { p -> marks[p.symbol]?.let { (it - p.entry) * p.qty } ?: 0.0 } ?: 0.0
+            Kpis(listOf(
+                Triple(if (mode == "paper") "Paper equity" else "Mode", if (mode == "paper") st?.let { f2(it.paperEquity) } ?: "-" else mode.uppercase(), C.Txt),
+                Triple("Open", "${st?.open?.size ?: 0}/${c.maxPositions}", C.Txt),
+                Triple("Open P&L", sgn2(openPnl), pnlColor(openPnl)),
+                Triple("Closed P&L", sgn2(pnl), pnlColor(pnl)),
+            ))
+            err?.let { Gap(6.dp); T(it, 12.sp, C.Amber) }
+            Gap(6.dp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                T(v?.let { "Updated ${hhmm(it.at)}" + if (loading) " · loading…" else "" } ?: "Loading…", 11.sp, C.Dim, modifier = Modifier.weight(1f))
+                T("Refresh", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { vm.loadPumps(true) })
+            }
+            SectionTitle("Open longs")
+        }
+        val open = v?.state?.open?.values?.toList() ?: emptyList()
+        if (open.isEmpty()) item { T("No open longs.", 13.sp, C.Muted) }
+        for (p in open) item(key = "po" + p.symbol) {
+            val mk = marks[p.symbol]
+            val upnl = mk?.let { (it - p.entry) * p.qty }
+            var ask by remember { mutableStateOf(false) }
+            var edit by remember { mutableStateOf(false) }
+            Card(border = if (upnl == null) C.Border else pnlColor(upnl), onClick = { vm.showChart(p.symbol) }) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    T(p.symbol, 14.sp, C.Txt, FontWeight.Bold); HGap(8.dp); Pill("LONG", C.Green, filled = true); Box(Modifier.weight(1f))
+                    Column(horizontalAlignment = Alignment.End) {
+                        T(upnl?.let { (if (it >= 0) "Profit " else "Loss ") + "${sgn2(it)} USDT" } ?: "-", 15.sp, pnlColor(upnl), FontWeight.Bold)
+                        upnl?.let { T("${sgn1(it / p.margin * 100)}% of ${f2(p.margin)} margin", 11.sp, pnlColor(it)) }
+                    }
+                }
+                T("Entry ${px(p.entry)} · now ${px(mk)} · SL ${px(p.sl)} · TP ${px(p.tp)}", 11.sp, C.Muted, mono = true)
+                Gap(2.dp)
+                TpSlAmounts("LONG", p.entry, p.qty, p.sl, p.tp)
+                T("Opened ${dayHhmm(p.opened)} · ${p.rule} · time exit ${dayHhmm(p.exitAt)}", 11.sp, C.Muted)
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                    Box(Modifier.weight(1f))
+                    T("Edit SL / TP", 13.sp, C.Blue, FontWeight.Bold, modifier = Modifier.clickable { edit = true })
+                    HGap(14.dp)
+                    T("Close now", 13.sp, C.Red, FontWeight.Bold, modifier = Modifier.clickable { ask = true })
+                }
+            }
+            if (edit) EditExitsDialog(vm, act, mode, p.symbol, "LONG", p.entry, p.qty, p.sl, p.tp, mk) { edit = false }
+            if (ask) AlertDialog(onDismissRequest = { ask = false },
+                confirmButton = { TextButton({ ask = false
+                    if (mode == "live") act.confirmUser("Close LIVE long ${p.symbol}") { vm.pumpClose(p.symbol) } else vm.pumpClose(p.symbol)
+                }) { Text("Close at market", color = C.Red) } },
+                dismissButton = { TextButton({ ask = false }) { Text("Keep") } },
+                title = { Text("Close ${p.symbol} long?") }, text = { Text("Sells the long at market and removes its SL/TP.") },
+                containerColor = C.Panel)
+            Gap(6.dp)
+        }
+        item {
+            val sc = v?.scan
+            SectionTitle("Base breakouts (last daily close)")
+            T(sc?.let { "Scanned ${dayHhmm(it.at)} · ${it.checked} coins checked · ${it.list.size} breakout(s)" } ?: "Not scanned yet today.", 11.sp, C.Dim)
+            T("Scan now", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { vm.loadBreakouts(true) }.padding(vertical = 4.dp))
+        }
+        val bos = v?.scan?.list ?: emptyList()
+        if (bos.isEmpty()) item { T("No base breakout on the last daily close.", 13.sp, C.Muted) }
+        for (b in bos) item(key = "bo" + b.symbol) {
+            val isOpen = v?.state?.open?.containsKey(b.symbol) == true
+            Card(border = C.Green) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    T(b.symbol, 14.sp, C.Txt, FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Pill("${sgn1(b.dayPct)}% day", C.Green); HGap(6.dp); Pill(String.format(Locale.US, "%.1fx vol", b.volX), C.Amber)
+                }
+                T("Base ${px(b.baseLow)} – ${px(b.baseHigh)} (${pctTxt(Math.round(b.rangePct).toDouble())}% range) · close ${px(b.close)}", 11.sp, C.Muted, mono = true)
+                T("Plan: long ~${px(marks[b.symbol] ?: b.close)} · SL −${pctTxt(c.boSlPct)}% · TP +${pctTxt(c.boTpPct)}%", 11.sp, C.Muted)
+                if (!isOpen) {
+                    Gap(6.dp)
+                    var ask by remember { mutableStateOf(false) }
+                    Btn("Open long now", C.Green, height = 40.dp) { ask = true }
+                    if (ask) AlertDialog(onDismissRequest = { ask = false },
+                        confirmButton = { TextButton({ ask = false
+                            if (mode == "live") act.confirmUser("Open LIVE long ${b.symbol}") { vm.pumpOpen(b.symbol) } else vm.pumpOpen(b.symbol)
+                        }) { Text("Open long", color = C.Green) } },
+                        dismissButton = { TextButton({ ask = false }) { Text("Cancel") } },
+                        title = { Text("Long ${b.symbol} (${mode.uppercase()})?") },
+                        text = { Text("Market buy, ${pctTxt(c.marginPct)}% of equity as margin × ${c.leverage}x. SL −${pctTxt(c.boSlPct)}% / TP +${pctTxt(c.boTpPct)}%, " +
+                            "closes after ${c.boHoldDays} days. Stop and target are placed on Binance.") },
+                        containerColor = C.Panel)
+                }
+            }
+            Gap(6.dp)
+        }
+        item { SectionTitle("Latest listing news (Upbit KRW / Binance spot)") }
+        val nw = v?.news ?: emptyList()
+        if (nw.isEmpty()) item { T("No recent listing post naming a Binance futures coin.", 13.sp, C.Muted) }
+        for (n in nw.take(15)) item(key = "n" + n.key) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    T("${n.symbol} · ${n.source}", 12.sp, C.Txt, FontWeight.SemiBold)
+                    T("${dayHhmm(n.time)} · ${n.title}", 10.sp, C.Muted, maxLines = 2)
+                }
+                val fresh = System.currentTimeMillis() - n.time < c.newsMaxAgeMin * 60_000L
+                Pill(if (fresh) "NEW" else "old", if (fresh) C.Green else C.Muted)
+            }
+        }
+        item { SectionTitle("Closed longs") }
+        val jr = v?.journal ?: emptyList()
+        if (jr.isEmpty()) item { T("No closed trades yet.", 13.sp, C.Muted) }
+        for ((i, t) in jr.take(150).withIndex()) item(key = "pj$i") {
+            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    T(t.symbol + if (t.rule.isNotEmpty()) " · ${t.rule}" else "", 13.sp, C.Txt, FontWeight.SemiBold, maxLines = 1)
+                    T("${dayHhmm(t.opened)} → ${dayHhmm(t.closed)} · ${t.reason}", 11.sp, C.Muted)
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    T((if (t.pnl >= 0) "Profit " else "Loss ") + "${sgn2(t.pnl)} USDT", 13.sp, pnlColor(t.pnl), FontWeight.Bold)
+                    t.retPct?.let { T("${sgn1(it)}% margin", 11.sp, pnlColor(it)) }
+                }
+            }
+        }
+        item {
+            SectionTitle("Size and risk (tap a number to type any value)")
+            Stepper("Margin per long", "${pctTxt(c.marginPct)}% of equity", "Binance needs 5+ USDT per position",
+                onMinus = { save(c.copy(marginPct = (c.marginPct - 1).coerceAtLeast(0.5))) },
+                onPlus = { save(c.copy(marginPct = (c.marginPct + 1).coerceAtMost(100.0))) },
+                onSet = { save(c.copy(marginPct = it.coerceIn(0.1, 100.0))) })
+            Stepper("Leverage", "${c.leverage}x", "At 5x a −20% stop costs the whole margin",
+                onMinus = { save(c.copy(leverage = (c.leverage - 1).coerceAtLeast(1))) },
+                onPlus = { save(c.copy(leverage = (c.leverage + 1).coerceAtMost(125))) },
+                onSet = { save(c.copy(leverage = it.toInt().coerceIn(1, 125))) })
+            Stepper("Max open longs", "${c.maxPositions}",
+                onMinus = { save(c.copy(maxPositions = (c.maxPositions - 1).coerceAtLeast(1))) },
+                onPlus = { save(c.copy(maxPositions = c.maxPositions + 1)) },
+                onSet = { save(c.copy(maxPositions = it.toInt().coerceAtLeast(1))) })
+            SectionTitle("Rule settings")
+            Stepper("Breakout: base days", "${c.boBaseDays}", onMinus = { save(c.copy(boBaseDays = (c.boBaseDays - 5).coerceAtLeast(10))) },
+                onPlus = { save(c.copy(boBaseDays = (c.boBaseDays + 5).coerceAtMost(200))) }, onSet = { save(c.copy(boBaseDays = it.toInt().coerceIn(10, 200))) })
+            Stepper("Breakout: max base range", "${pctTxt(c.boRangePct)}%", onMinus = { save(c.copy(boRangePct = (c.boRangePct - 5).coerceAtLeast(10.0))) },
+                onPlus = { save(c.copy(boRangePct = c.boRangePct + 5)) }, onSet = { save(c.copy(boRangePct = it.coerceAtLeast(5.0))) })
+            Stepper("Breakout: min volume", "${pctTxt(c.boVolX)}×", onMinus = { save(c.copy(boVolX = (c.boVolX - 0.5).coerceAtLeast(1.0))) },
+                onPlus = { save(c.copy(boVolX = c.boVolX + 0.5)) }, onSet = { save(c.copy(boVolX = it.coerceAtLeast(1.0))) })
+            Stepper("Breakout: stop-loss", "−${pctTxt(c.boSlPct)}%", onMinus = { save(c.copy(boSlPct = (c.boSlPct - 5).coerceAtLeast(5.0))) },
+                onPlus = { save(c.copy(boSlPct = (c.boSlPct + 5).coerceAtMost(90.0))) }, onSet = { save(c.copy(boSlPct = it.coerceIn(1.0, 95.0))) })
+            Stepper("Breakout: take-profit", "+${pctTxt(c.boTpPct)}%", onMinus = { save(c.copy(boTpPct = (c.boTpPct - 10).coerceAtLeast(5.0))) },
+                onPlus = { save(c.copy(boTpPct = c.boTpPct + 10)) }, onSet = { save(c.copy(boTpPct = it.coerceAtLeast(1.0))) })
+            Stepper("Breakout: hold days", "${c.boHoldDays}", onMinus = { save(c.copy(boHoldDays = (c.boHoldDays - 1).coerceAtLeast(1))) },
+                onPlus = { save(c.copy(boHoldDays = c.boHoldDays + 1)) }, onSet = { save(c.copy(boHoldDays = it.toInt().coerceAtLeast(1))) })
+            Stepper("Listing news: stop-loss", "−${pctTxt(c.newsSlPct)}%", onMinus = { save(c.copy(newsSlPct = (c.newsSlPct - 5).coerceAtLeast(5.0))) },
+                onPlus = { save(c.copy(newsSlPct = (c.newsSlPct + 5).coerceAtMost(90.0))) }, onSet = { save(c.copy(newsSlPct = it.coerceIn(1.0, 95.0))) })
+            Stepper("Listing news: take-profit", "+${pctTxt(c.newsTpPct)}%", onMinus = { save(c.copy(newsTpPct = (c.newsTpPct - 5).coerceAtLeast(5.0))) },
+                onPlus = { save(c.copy(newsTpPct = c.newsTpPct + 5)) }, onSet = { save(c.copy(newsTpPct = it.coerceAtLeast(1.0))) })
+            Stepper("Listing news: hold hours", "${c.newsHoldH}", onMinus = { save(c.copy(newsHoldH = (c.newsHoldH - 4).coerceAtLeast(1))) },
+                onPlus = { save(c.copy(newsHoldH = c.newsHoldH + 4)) }, onSet = { save(c.copy(newsHoldH = it.toInt().coerceAtLeast(1))) })
+            val need = kotlin.math.ceil(5.0 / (c.marginPct / 100 * c.leverage)).toInt()
+            Gap(6.dp)
+            T("Each long = ${pctTxt(c.marginPct)}% of equity × ${c.leverage}x. You need at least $need USDT equity for Binance's 5 USDT minimum.", 11.sp, C.Muted)
+            SectionTitle("Backtest (2021 – Nov 2026, after fees and funding)")
+            T("Base breakout (60-day base): +12.1% per trade in 2021-25 but −5.4% in 2025 and −0.2% in 2026 (243 trades). " +
+                "Upbit KRW listing: −1.7% (2021-25), +4.7% (2026, 38 trades); one minute after the post the price is already up 17-29% on average. " +
+                "Binance spot listing: −2.3% / +1.0% (only 36 events). No rule was positive in both periods, so keep size small. Past results are not a promise.",
+                12.sp, C.Muted)
+            Gap(24.dp)
+        }
     }
 }
 
@@ -147,14 +347,20 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
                     }
                 }
                 T("Entry ${px(p.entry)} · now ${px(mk)} · SL ${px(p.sl)} · TP ${px(p.tp)}", 11.sp, C.Muted, mono = true)
+                Gap(2.dp)
+                TpSlAmounts("SHORT", p.entry, p.qty, p.sl, p.tp)
                 p.addPrice?.let { T("Scale-in: adds ${px(p.addQty)} more at ${px(it)}", 11.sp, C.Amber) }
                 if (p.hedgeQty > 0) T("BTC hedge long ${px(p.hedgeQty)} @ ${px(p.hedgeEntry)} · " + (hp?.let { "${sgn2(it)} USDT" } ?: "-"), 11.sp, pnlColor(hp))
                 T("Opened ${dayHhmm(p.opened)} · ${p.rule} · time exit ${dayHhmm(p.exitAt)}", 11.sp, C.Muted)
                 var ask by remember { mutableStateOf(false) }
+                var edit by remember { mutableStateOf(false) }
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
                     Box(Modifier.weight(1f))
+                    T("Edit SL / TP", 13.sp, C.Blue, FontWeight.Bold, modifier = Modifier.clickable { edit = true })
+                    HGap(14.dp)
                     T("Close now", 13.sp, C.Red, FontWeight.Bold, modifier = Modifier.clickable { ask = true })
                 }
+                if (edit) EditExitsDialog(vm, act, mode, p.symbol, "SHORT", p.entry, p.qty, p.sl, p.tp, mk) { edit = false }
                 if (ask) AlertDialog(onDismissRequest = { ask = false },
                     confirmButton = { TextButton({ ask = false
                         if (mode == "live") act.confirmUser("Close LIVE short ${p.symbol}") { vm.shortClose(p.symbol) } else vm.shortClose(p.symbol)

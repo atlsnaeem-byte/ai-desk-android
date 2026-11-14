@@ -52,6 +52,8 @@ fun PositionsScreen(vm: AppVM) {
     val err by vm.accountError.collectAsState()
     val logs by vm.logs.collectAsState()
     var confirm by remember { mutableStateOf<String?>(null) }
+    var edit by remember { mutableStateOf<Position?>(null) }
+    val act = androidx.compose.ui.platform.LocalContext.current as pk.aidesk.app.MainActivity
     val closed by vm.closedAll.collectAsState()
     LaunchedEffect(Unit) { vm.loadLogs(); vm.refreshAccount(); vm.loadClosedAll() }
     LaunchedEffect(acc) { vm.loadClosedAll() }
@@ -110,7 +112,7 @@ fun PositionsScreen(vm: AppVM) {
                 if (acc != null && ps.isEmpty()) T("No open positions.", 14.sp, C.Muted, modifier = Modifier.padding(8.dp))
             }
             items(acc?.positions ?: emptyList(), key = { it.symbol + "|" + it.origin }) { p ->
-                PositionCard(p, cfg, now, onOpen = { vm.showChart(p.symbol) }) { confirm = p.symbol }
+                PositionCard(p, cfg, now, onOpen = { vm.showChart(p.symbol) }, onEdit = { edit = p }) { confirm = p.symbol }
                 Gap(8.dp)
             }
             item {
@@ -149,13 +151,16 @@ fun PositionsScreen(vm: AppVM) {
             text = { Text("Market order (reduce-only). Its TP/SL orders are cancelled.") },
             containerColor = C.Panel)
     }
+    edit?.let { p ->
+        EditExitsDialog(vm, act, cfg.mode, p.symbol, p.side, p.entry, p.qty, p.sl, p.tp, p.mark) { edit = null; vm.refreshAccount() }
+    }
 }
 
 fun hhmm(ms: Long): String = DateTimeFormatter.ofPattern("HH:mm").withZone(pk.aidesk.app.core.Engine.PKT).format(Instant.ofEpochMilli(ms))
 fun dayHhmm(ms: Long): String = DateTimeFormatter.ofPattern("EEE HH:mm").withZone(pk.aidesk.app.core.Engine.PKT).format(Instant.ofEpochMilli(ms))
 
 @Composable
-private fun PositionCard(p: Position, cfg: Config, now: Long, onOpen: () -> Unit, onClose: () -> Unit) {
+private fun PositionCard(p: Position, cfg: Config, now: Long, onOpen: () -> Unit, onEdit: () -> Unit, onClose: () -> Unit) {
     val col = C.side(p.side)
     val slD = p.sl?.let { abs(p.entry - it) }
     val r = if (slD != null && slD > 0) p.upnl / (p.qty * slD) else null
@@ -189,6 +194,7 @@ private fun PositionCard(p: Position, cfg: Config, now: Long, onOpen: () -> Unit
                 T("SL ${px(p.sl)}", 11.sp, C.Red, mono = true); T("TP ${px(p.tp)}", 11.sp, C.Green, mono = true)
             }
         }
+        if (p.sl != null || p.tp != null) { Gap(4.dp); TpSlAmounts(p.side, p.entry, p.qty, p.sl, p.tp) }
         Gap(8.dp)
         Row(verticalAlignment = Alignment.CenterVertically) {
             val opened = p.openedMs
@@ -199,6 +205,7 @@ private fun PositionCard(p: Position, cfg: Config, now: Long, onOpen: () -> Unit
                 else -> "opened ${dayHhmm(opened)}  ·  tap for chart"
             }
             T(txt, 11.sp, C.Muted, modifier = Modifier.weight(1f))
+            if (!p.origin.startsWith("copy") && p.origin != "btc hedge") { Pill("Edit SL / TP", C.Blue, onClick = onEdit); HGap(6.dp) }
             Pill("Close", C.Red, onClick = onClose)
         }
     }

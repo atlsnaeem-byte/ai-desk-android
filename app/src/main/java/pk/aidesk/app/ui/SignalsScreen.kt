@@ -82,7 +82,8 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
     val ta by vm.taSignals.collectAsState()
     val ticks by TraderService.ticks.collectAsState()
     LaunchedEffect(scan?.time) { vm.loadSigLog() }
-    LaunchedEffect(ticks) { vm.loadTa() }
+    LaunchedEffect(ticks) { vm.loadTa(); vm.loadBreakouts() }
+    val bos by vm.breakouts.collectAsState()
     LaunchedEffect(Unit) { while (true) { vm.refreshMarks(); delay(15_000) } }
     // A signal is closed once its stop-loss or target was hit (bar check by the scanner, or the live price since then).
     fun closedWhy(s: Signal): String? {
@@ -190,6 +191,45 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
             items(taShown, key = { "ta" + it.id }) { s ->
                 TaCard(s, marks[s.symbol], taHit(s)) { vm.openTaSignal(s.symbol, s.tf) }
                 Gap(8.dp)
+            }
+            // ---- base breakouts (daily), from the Pump hunter's once-a-day scan
+            if (filter != "short" && filter != "closed") {
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        T("Base breakouts · daily", 14.sp, C.Txt, FontWeight.Bold)
+                        HGap(6.dp); T("60-day base, close above it on big volume", 11.sp, C.Dim, modifier = Modifier.weight(1f), maxLines = 1)
+                        T("Scan", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { vm.loadBreakouts(true) })
+                    }
+                    val pc = vm.pumpHunter.cfg()
+                    T(if (pc.enabled && pc.breakout) "Auto-trade ON in the Pump hunter (${cfg.mode.uppercase()}) · Bots > Pump hunter"
+                        else "Signals only · turn on auto-trade in Bots > Pump hunter", 11.sp, if (pc.enabled && pc.breakout) C.Green else C.Muted)
+                    if (bos?.list.isNullOrEmpty()) T(bos?.let { "No base breakout on the ${dayHhmm(it.day)} daily close (${it.checked} coins checked)." }
+                        ?: "Not scanned yet: the scan runs once a day after the 05:00 PKT daily close.", 12.sp, C.Muted, modifier = Modifier.padding(vertical = 4.dp))
+                    Gap(6.dp)
+                }
+                items(bos?.list ?: emptyList(), key = { "bo" + it.symbol }) { b ->
+                    val m = marks[b.symbol]
+                    Card(border = C.Green, onClick = { vm.showChart(b.symbol) }) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            T(b.symbol, 15.sp, C.Txt, FontWeight.Bold); HGap(8.dp)
+                            Pill("LONG", C.Green, filled = true); HGap(6.dp); Pill("1d", C.Blue); HGap(6.dp)
+                            Pill(String.format(java.util.Locale.US, "%.1fx vol", b.volX), C.Amber)
+                            Box(Modifier.weight(1f))
+                            T("${sgn2(b.dayPct)}%", 13.sp, C.Green, FontWeight.SemiBold, mono = true)
+                        }
+                        Gap(4.dp)
+                        T("Broke out of a ${pctTxt(Math.round(b.rangePct).toDouble())}% range (${px(b.baseLow)} – ${px(b.baseHigh)})", 12.sp, C.Muted)
+                        val e = m ?: b.close
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            T("E ${px(e)}", 11.sp, C.Muted, mono = true)
+                            T("TP ${px(e * (1 + b.tpPct / 100))}", 11.sp, C.Green, mono = true)
+                            T("SL ${px(e * (1 - b.slPct / 100))}", 11.sp, C.Red, mono = true)
+                            m?.let { T("now ${sgn2((it / b.close - 1) * 100)}%", 11.sp, if (it >= b.close) C.Green else C.Red, mono = true) }
+                        }
+                        T("Backtest: +12% per trade in 2021-25, flat in 2026. Tap for the chart.", 10.sp, C.Dim)
+                    }
+                    Gap(8.dp)
+                }
             }
             item {
                 Gap(4.dp)

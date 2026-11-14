@@ -510,6 +510,15 @@ class ShortHunter(private val store: Store) {
         return ev.joinToString("\n") { it.title + "  " + it.text }.ifEmpty { "Closed $s" }
     }
 
+    /** New SL / TP for an open short (the Binance orders are replaced by the caller). */
+    fun setExits(mode: String, s: String, sl: Double, tp: Double): Boolean {
+        val st = state(mode)
+        val p = st.open[s] ?: return false
+        p.sl = sl; p.tp = tp
+        saveState(mode, st)
+        return true
+    }
+
     private fun record(mode: String, st: ShortState, p: ShortPos, exit: Double, reason: String, pnl: Double, now: Long, ev: MutableList<Event>) {
         addJournal(mode, ShortDone(p.symbol, p.entry, exit, reason, p.opened, now, pnl, if (p.margin > 0) pnl / p.margin * 100 else null, p.rule))
         st.open.remove(p.symbol)

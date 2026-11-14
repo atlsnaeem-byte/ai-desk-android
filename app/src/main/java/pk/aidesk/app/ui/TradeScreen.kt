@@ -159,6 +159,7 @@ private fun CoinView(vm: AppVM, act: MainActivity, sym: String) {
     val live by vm.livePx.collectAsState()
     val pos by vm.openPos.collectAsState()
     var askClose by remember { mutableStateOf(false) }
+    var editExits by remember { mutableStateOf(false) }
     val ticket = remember(sym) { TicketState(cfg.leverage.coerceIn(1, 125)) }
     DisposableEffect(sym) { onDispose { vm.stopAnalysis() } }
     val taList by vm.taSignals.collectAsState()
@@ -197,10 +198,16 @@ private fun CoinView(vm: AppVM, act: MainActivity, sym: String) {
                     }
                     T("Entry ${px(p.entry)} · now ${px(now)} · qty ${px(p.qty)}" + (p.sl?.let { " · SL ${px(it)}" } ?: "") +
                         (p.tp?.let { " · TP ${px(it)}" } ?: ""), 11.sp, C.Muted, mono = true)
-                    Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                    if (p.sl != null || p.tp != null) { Gap(4.dp); TpSlAmounts(p.side, p.entry, p.qty, p.sl, p.tp) }
+                    Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         T(p.opened?.let { "opened ${dayHhmm(it)} · price updates every 3 s" } ?: "price updates every 3 s", 10.sp, C.Dim, modifier = Modifier.weight(1f))
+                        if (!p.source.startsWith("Copy")) {
+                            T("Edit SL / TP", 13.sp, C.Blue, FontWeight.Bold, modifier = Modifier.clickable { editExits = true })
+                            HGap(14.dp)
+                        }
                         T("Close position", 13.sp, C.Red, FontWeight.Bold, modifier = Modifier.clickable { askClose = true })
                     }
+                    if (editExits) EditExitsDialog(vm, act, cfg.mode, sym, p.side, p.entry, p.qty, p.sl, p.tp, now) { editExits = false }
                 }
                 Gap(6.dp)
             }

@@ -283,6 +283,74 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         loadShorts(false); r
     }
 
+    // ------------------------------------------------------------------ pump hunter
+    val pumpHunter = pk.aidesk.app.core.PumpHunter(store)
+    class PumpsView(val cfg: pk.aidesk.app.core.PumpCfg, val scan: pk.aidesk.app.core.BreakoutScan?, val news: List<pk.aidesk.app.core.News>,
+                    val state: pk.aidesk.app.core.PumpState, val journal: List<pk.aidesk.app.core.PumpDone>, val at: Long)
+    val pumps = MutableStateFlow<PumpsView?>(null)
+    val pumpsErr = MutableStateFlow<String?>(null)
+    val pumpsLoading = MutableStateFlow(false)
+    /** Daily base-breakout list for the Signals tab (cached scan, refreshed by the service once a day). */
+    val breakouts = MutableStateFlow(pumpHunter.lastScan())
+
+    fun loadBreakouts(force: Boolean = false) = viewModelScope.launch {
+        if (force) toast.value = "Scanning all coins' daily candles (about a minute)…"
+        try {
+            breakouts.value = withContext(Dispatchers.IO) {
+                if (force) pumpHunter.breakouts(pub.also { it.syncTime() }, force = true) else pumpHunter.lastScan() ?: pumpHunter.breakouts(pub.also { it.syncTime() })
+            }
+            if (force) toast.value = "Breakout scan done: ${breakouts.value?.list?.size ?: 0} found"
+        } catch (e: Exception) {
+            if (force) toast.value = "Breakout scan failed: ${e.message ?: e.javaClass.simpleName}"
+        }
+    }
+
+    fun loadPumps(market: Boolean = true) = viewModelScope.launch {
+        pumpsLoading.value = true
+        try {
+            val mode = config.value.mode
+            val old = pumps.value
+            val v = withContext(Dispatchers.IO) {
+                val nw = if (market || old == null) runCatching { pumpHunter.news(pub) }.getOrDefault(old?.news ?: emptyList()) else old.news
+                PumpsView(pumpHunter.cfg(), pumpHunter.lastScan(), nw, pumpHunter.state(mode), pumpHunter.journal(mode).reversed(), System.currentTimeMillis())
+            }
+            pumps.value = v; pumpsErr.value = null
+            breakouts.value = v.scan
+        } catch (e: Exception) {
+            pumpsErr.value = e.message ?: e.javaClass.simpleName
+        } finally { pumpsLoading.value = false }
+    }
+
+    fun savePumpCfg(c: pk.aidesk.app.core.PumpCfg) {
+        pumpHunter.saveCfg(c)
+        pumps.value?.let { pumps.value = PumpsView(c, it.scan, it.news, it.state, it.journal, it.at) }
+        if (c.enabled) TraderService.start(getApplication(), TraderService.ACTION_PUMPS)
+    }
+
+    fun pumpOpen(symbol: String) = act {
+        val r = withContext(Dispatchers.IO) {
+            val c = engine.cfg(); val api = engine.client(c); api.syncTime()
+            pumpHunter.openManual(c.mode, api, symbol) { api.equity() }
+        }
+        loadPumps(false); r
+    }
+
+    fun pumpClose(symbol: String) = act {
+        val r = withContext(Dispatchers.IO) {
+            val c = engine.cfg(); val api = engine.client(c); api.syncTime()
+            pumpHunter.closeManual(c.mode, api, symbol)
+        }
+        loadPumps(false); r
+    }
+
+    /** New stop-loss / take-profit for an open position (any bot). */
+    fun editExits(symbol: String, sl: Double, tp: Double, done: () -> Unit = {}) = act {
+        val r = withContext(Dispatchers.IO) { engine.editExits(symbol, sl, tp) }
+        openPos.value = withContext(Dispatchers.IO) { findPosition(symbol) }
+        loadShorts(false); loadPumps(false); loadManual()
+        done(); r
+    }
+
     fun copyClose(ck: String) = act {
         val r = withContext(Dispatchers.IO) {
             val c = engine.cfg(); val api = engine.client(c); api.syncTime()
@@ -343,7 +411,8 @@ class AppVM(app: Application) : AndroidViewModel(app) {
                     it.closed, it.pnl, it.reason)
             }
             val c = copyBot.journal(mode).map { ClosedRow(it.symbol, it.side, "copy ${it.leader}", it.closed, it.pnl, it.reason) }
-            (a + b + c).sortedByDescending { it.closed }
+            val d = pumpHunter.journal(mode).map { ClosedRow(it.symbol, "LONG", "pump hunter", it.closed, it.pnl, it.reason) }
+            (a + b + c + d).sortedByDescending { it.closed }
         }
     }
 
@@ -386,6 +455,7 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     fun findPosition(symbol: String): PosLine? {
         val mode = config.value.mode
         shortHunter.state(mode).open[symbol]?.let { return PosLine("Short hunter", "SHORT", it.entry, it.qty, it.sl, it.tp, it.opened, it.margin) }
+        pumpHunter.state(mode).open[symbol]?.let { return PosLine("Pump hunter · ${it.rule}", "LONG", it.entry, it.qty, it.sl, it.tp, it.opened, it.margin) }
         copyBot.state(mode).copies.values.firstOrNull { it.symbol == symbol }?.let {
             return PosLine("Copy · ${it.leader}", it.side, it.entry, it.qty, null, null, it.opened, it.qty * it.entry / it.lev)
         }

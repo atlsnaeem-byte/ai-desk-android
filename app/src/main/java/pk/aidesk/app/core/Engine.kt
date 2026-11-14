@@ -432,6 +432,8 @@ class Engine(context: Context) {
         if (symbol !in st.open) {      // positions of the Short hunter / Copy bots: close through the bot so it records the result
             val sh = ShortHunter(store)
             if (symbol in sh.state(c.mode).open) return@synchronized sh.closeManual(c.mode, api, symbol)
+            val ph = PumpHunter(store)
+            if (symbol in ph.state(c.mode).open) return@synchronized ph.closeManual(c.mode, api, symbol)
             val cb = CopyBot(store)
             cb.state(c.mode).copies.entries.firstOrNull { it.value.symbol == symbol }?.let {
                 return@synchronized cb.closeManual(c.mode, api, Binance(), it.key)
@@ -449,6 +451,77 @@ class Engine(context: Context) {
         msg
     }
 
+    /**
+     * Positions tab > Edit SL / TP: new stop and target for an open position of any bot (or one opened outside the app).
+     * Live/testnet: the Binance SL/TP orders are replaced (old ones restored if the new stop is rejected).
+     */
+    fun editExits(symbol: String, sl: Double, tp: Double): String = synchronized(LOCK) {
+        synchronized(ManualDesk.LOCK) {
+            synchronized(PumpHunter.STEP_LOCK) {
+                val c = cfg()
+                val api = client(c)
+                api.syncTime()
+                val mode = c.mode
+                val st = store.state(mode, c.paperStartEquity)
+                val sh = ShortHunter(store); val ph = PumpHunter(store); val desk = ManualDesk(store)
+                val shortPos = sh.state(mode).open[symbol]
+                val pumpPos = ph.state(mode).open[symbol]
+                val manPos = desk.active(mode).find { it.symbol == symbol && it.status == "open" }
+                val aiPos = st.open[symbol]
+                if (shortPos == null && pumpPos == null && manPos == null && aiPos == null &&
+                    CopyBot(store).state(mode).copies.values.any { it.symbol == symbol })
+                    throw UserError("Copy trades close when the leader closes, so they have no SL / TP to edit.")
+                val live = trading(c)
+                val livePos = if (live) api.positions()[symbol] else null
+                val side = when {
+                    shortPos != null -> "SHORT"; pumpPos != null -> "LONG"; manPos != null -> manPos.side; aiPos != null -> aiPos.side
+                    livePos != null -> if (livePos.getString("positionAmt").toDouble() > 0) "LONG" else "SHORT"
+                    else -> throw UserError("No open $symbol position.")
+                }
+                val dr = if (side == "LONG") 1 else -1
+                val mark = api.markPrice(symbol)
+                if ((mark - sl) * dr <= 0) throw UserError("Stop-loss must be ${if (dr == 1) "below" else "above"} the current price ${fmt(mark)} for a $side.")
+                if ((tp - mark) * dr <= 0) throw UserError("Take-profit must be ${if (dr == 1) "above" else "below"} the current price ${fmt(mark)} for a $side.")
+                var newSl = sl; var newTp = tp
+                var note = ""
+                if (live) {
+                    if (livePos == null) throw UserError("No open $symbol position on Binance.")
+                    newSl = api.fmtPrice(symbol, sl).first; newTp = api.fmtPrice(symbol, tp).first
+                    val exitSide = if (dr == 1) "SELL" else "BUY"
+                    val oldSl = shortPos?.sl ?: pumpPos?.sl ?: manPos?.sl ?: aiPos?.sl
+                    val oldTp = shortPos?.tp ?: pumpPos?.tp ?: manPos?.tp ?: aiPos?.tp
+                    api.cancelAll(symbol)
+                    try {
+                        api.closeTrigger(symbol, exitSide, "STOP_MARKET", api.fmtPrice(symbol, newSl).second)
+                    } catch (e: BinanceException) {
+                        oldSl?.let { o -> runCatching { api.closeTrigger(symbol, exitSide, "STOP_MARKET", api.fmtPrice(symbol, o).second) } }
+                        oldTp?.let { o -> runCatching { api.closeTrigger(symbol, exitSide, "TAKE_PROFIT_MARKET", api.fmtPrice(symbol, o).second) } }
+                        store.log("ERROR", "Edit SL/TP $symbol: new stop rejected (${e.msg}), old orders put back")
+                        throw UserError("Binance rejected the new stop-loss (${e.msg}). The old SL / TP were put back.")
+                    }
+                    try {
+                        api.closeTrigger(symbol, exitSide, "TAKE_PROFIT_MARKET", api.fmtPrice(symbol, newTp).second)
+                    } catch (e: BinanceException) {
+                        note = "\nTake-profit order rejected by Binance (${e.msg}); the bot watches the target itself."
+                        store.log("WARN", "Edit SL/TP $symbol: take-profit rejected (${e.msg})")
+                    }
+                }
+                val owner = when {
+                    shortPos != null -> { sh.setExits(mode, symbol, newSl, newTp); "Short hunter" }
+                    pumpPos != null -> { ph.setExits(mode, symbol, newSl, newTp); "Pump hunter" }
+                    manPos != null -> { desk.setExits(mode, symbol, newSl, newTp); "Trade tab" }
+                    aiPos != null -> {
+                        val t = aiPos.copy(sl = newSl, tp = newTp)
+                        st.open[symbol] = t; store.saveState(mode, st); store.journalUpsert(t); "AI bot"
+                    }
+                    else -> "Binance"
+                }
+                store.log("INFO", "Edit SL/TP $symbol ($owner, ${mode.uppercase()}): SL ${fmt(newSl)}  TP ${fmt(newTp)}")
+                "$symbol $side: new SL ${fmt(newSl)}, TP ${fmt(newTp)}" + (if (live) " (orders replaced on Binance)" else "") + note
+            }
+        }
+    }
+
     fun account(): Account {
         val c = cfg()
         val api = client(c)
@@ -459,7 +532,8 @@ class Engine(context: Context) {
             val shorts = shSt.open.values.toList()
             val (hq, he) = shSt.hedge()
             val copies = CopyBot(store).state(c.mode).copies.values.toList()
-            val any = st.open.isNotEmpty() || man.isNotEmpty() || shorts.isNotEmpty() || copies.isNotEmpty()
+            val longs = PumpHunter(store).state(c.mode).open.values.toList()
+            val any = st.open.isNotEmpty() || man.isNotEmpty() || shorts.isNotEmpty() || copies.isNotEmpty() || longs.isNotEmpty()
             val marks = if (any) runCatching { api.markPrices() }.getOrDefault(emptyMap()) else emptyMap()
             // bot positions use their own paper wallets: listed with live P&L, not added to this equity
             val botPos = shorts.map { p ->
@@ -473,6 +547,10 @@ class Engine(context: Context) {
                 val mk = marks[p.symbol]
                 val dr = if (p.side == "LONG") 1 else -1
                 Position(p.symbol, p.side, p.qty, p.entry, mk, if (mk != null) p.qty * dr * (mk - p.entry) else 0.0, null, null, p.opened, true, "copy")
+            } + longs.map { p ->
+                val mk = marks[p.symbol]
+                Position(p.symbol, "LONG", p.qty, p.entry, mk, if (mk != null) p.qty * (mk - p.entry) else 0.0, p.sl, p.tp, p.opened, true,
+                    "pump hunter · " + p.rule)
             }
             var upnl = 0.0
             val ps = st.open.values.map { tr ->
@@ -494,15 +572,17 @@ class Engine(context: Context) {
         val owners = store.botSymbols(c.mode)
         val man = ManualDesk(store).active(c.mode).filter { it.status == "open" }.associateBy { it.symbol }
         val sh = ShortHunter(store).state(c.mode).open
+        val ph = PumpHunter(store).state(c.mode).open
         val ps = api.positions().map { (s, p) ->
             val amt = p.getString("positionAmt").toDouble()
             val tr = st.open[s]
             val mp = man[s]
             val sp = sh[s]
+            val pp = ph[s]
             Position(s, if (amt > 0) "LONG" else "SHORT", abs(amt), p.getString("entryPrice").toDouble(),
                 p.optString("markPrice").toDoubleOrNull(), p.optString("unRealizedProfit").toDoubleOrNull() ?: 0.0,
-                tr?.sl ?: mp?.sl ?: sp?.sl, tr?.tp ?: mp?.tp ?: sp?.tp, tr?.openedMs ?: mp?.filledMs ?: sp?.opened,
-                tr != null || mp != null || sp != null, tr?.origin ?: owners[s] ?: "external")
+                tr?.sl ?: mp?.sl ?: sp?.sl ?: pp?.sl, tr?.tp ?: mp?.tp ?: sp?.tp ?: pp?.tp, tr?.openedMs ?: mp?.filledMs ?: sp?.opened ?: pp?.opened,
+                tr != null || mp != null || sp != null || pp != null, tr?.origin ?: owners[s] ?: "external")
         }
         return Account(c.mode, acc.getString("totalMarginBalance").toDouble(), acc.getString("availableBalance").toDouble(),
             acc.getString("totalUnrealizedProfit").toDouble(), ps, st.dayStart, st.halted)

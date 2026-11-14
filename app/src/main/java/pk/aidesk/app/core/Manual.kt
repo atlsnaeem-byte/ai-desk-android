@@ -10,7 +10,7 @@ import kotlin.math.min
 /** A manual trade the user placed from the Trade tab (entry order + SL/TP), tracked until it closes. */
 class ManualPlan(
     val id: String, val mode: String, val symbol: String, val side: String, val type: String,
-    val entry: Double, val sl: Double, val tp: Double, val qty: Double, val lev: Int,
+    val entry: Double, var sl: Double, var tp: Double, val qty: Double, val lev: Int,
     val created: Long, val expires: Long, val setup: String, val equityBefore: Double,
     var status: String = "pending",              // pending | open | closed | cancelled | failed
     var fill: Double? = null, var filledMs: Long? = null, var exit: Double? = null, var exitMs: Long? = null,
@@ -235,6 +235,16 @@ class ManualDesk(private val store: Store) {
         else paperExit(c, p, api.markPrice(p.symbol) * (1 - p.dir * SLIP / 100), "MANUAL", api.nowMs())
         save(c.mode, ps)
         "Closed ${p.symbol} ${p.side}" + (p.pnl?.let { "  ${String.format(Locale.US, "%+.4f", it)} USDT" } ?: "")
+    }
+
+    /** New SL / TP for an open manual position (the Binance orders are replaced by the caller). False if none. */
+    fun setExits(mode: String, symbol: String, sl: Double, tp: Double): Boolean = synchronized(LOCK) {
+        val ps = plans(mode)
+        val p = ps.find { it.symbol == symbol && it.status == "open" } ?: return@synchronized false
+        p.sl = sl; p.tp = tp
+        save(mode, ps)
+        journal(p)
+        true
     }
 
     /** Close an open manual position by symbol (Positions tab / notification). Returns null if there is none. */
