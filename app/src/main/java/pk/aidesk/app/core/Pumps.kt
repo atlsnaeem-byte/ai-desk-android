@@ -258,6 +258,8 @@ class PumpHunter(private val store: Store) {
         val ev = ArrayList<Event>()
         val now = api.nowMs()
         manageExits(mode, api, st, now, ev)
+        // Settings daily loss limit / profit target (% or USDT) pause new auto entries on the real account too
+        if (mode != "paper" && store.state(mode).halted != null) { saveState(mode, st); return@synchronized ev }
         if (c.enabled && c.breakout) {
             try {
                 val sc = breakouts(api, now)
@@ -282,6 +284,7 @@ class PumpHunter(private val store: Store) {
     fun newsStep(mode: String, api: Binance, equityOf: () -> Pair<Double, Double>): List<Event> = synchronized(STEP_LOCK) {
         val c = cfg()
         if (!c.newsOn) return@synchronized emptyList()
+        if (mode != "paper" && store.state(mode).halted != null) return@synchronized emptyList()
         val st = state(mode)
         val ev = ArrayList<Event>()
         newsPass(mode, api, st, api.nowMs(), c, equityOf, ev)
@@ -384,6 +387,8 @@ class PumpHunter(private val store: Store) {
 
     private fun record(mode: String, st: PumpState, p: PumpPos, exit: Double, reason: String, pnl: Double, now: Long, ev: MutableList<Event>) {
         addJournal(mode, PumpDone(p.symbol, p.entry, exit, reason, p.opened, now, pnl, if (p.margin > 0) pnl / p.margin * 100 else null, p.rule))
+        History.record(store, History.Rec(mode, "pump hunter", p.rule, p.symbol, "LONG", p.entry, exit, p.qty, p.margin,
+            if (p.margin > 0) p.qty * p.entry / p.margin else null, p.sl, p.tp, p.opened, now, pnl, reason))
         st.open.remove(p.symbol)
         store.log("INFO", "Pump hunter CLOSE ${p.symbol} $reason @ ${Engine.fmt(exit)} pnl ${String.format(Locale.US, "%+.4f", pnl)}")
         ev += Event("botclose", "Pump hunter closed ${p.symbol}  -  $reason", "${String.format(Locale.US, "%+.4f", pnl)} USDT", false, p.symbol)
@@ -404,6 +409,10 @@ class PumpHunter(private val store: Store) {
             val b = k.getJSONArray(i)
             if (b.getLong(0) > minOf(now, p.exitAt)) break
             val hi = b.getString(2).toDouble(); val lo = b.getString(3).toDouble()
+            val lev = if (p.margin > 0) p.qty * p.entry / p.margin else 1.0
+            if (Liq.beforeStop("LONG", p.entry, lev, p.sl) && lo <= Liq.trigger("LONG", p.entry, lev)) {
+                hit = "LIQUIDATED"; px = Liq.bankrupt("LONG", p.entry, lev); break
+            }
             if (lo <= p.sl) { hit = "stop-loss"; px = p.sl * (1 - SLIP / 100); break }
             if (hi >= p.tp) { hit = "take-profit"; px = p.tp; break }
         }

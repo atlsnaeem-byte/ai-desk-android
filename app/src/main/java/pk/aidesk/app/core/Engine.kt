@@ -199,9 +199,14 @@ class Engine(context: Context) {
             store.log("INFO", "New day $day, start equity ${fmt(eq)}")
         }
         val chg = st.dayStart?.takeIf { it > 0 }?.let { (eq / it - 1) * 100 } ?: 0.0
+        val usd = st.dayStart?.let { eq - it } ?: 0.0
         if (st.halted == null) {
             if (chg <= -c.dailyLossPct) st.halted = "daily loss limit hit (${"%.2f".format(Locale.US, chg)}%)"
+            else if (c.dailyLossUsdt > 0 && usd <= -c.dailyLossUsdt)
+                st.halted = "daily loss limit hit (${"%.2f".format(Locale.US, usd)} USDT, limit -${fmt(c.dailyLossUsdt)})"
             else if (chg >= c.dailyProfitPct) st.halted = "daily profit target reached (${"%.2f".format(Locale.US, chg)}%)"
+            else if (c.dailyProfitUsdt > 0 && usd >= c.dailyProfitUsdt)
+                st.halted = "daily profit target reached (${"%+.2f".format(Locale.US, usd)} USDT, target +${fmt(c.dailyProfitUsdt)})"
         }
         return chg
     }
@@ -213,10 +218,16 @@ class Engine(context: Context) {
             val dr = if (tr.side == "LONG") 1 else -1
             var exitP: Double? = null; var reason: String? = null; var exitT = 0L
             var n = 0
+            val lev = c.leverage.toDouble()
+            val liqFirst = Liq.beforeStop(tr.side, tr.entry, lev, tr.sl)
+            val liq = Liq.trigger(tr.side, tr.entry, lev)
             for (i in 0 until df.size) {
                 if (df.openTime[i] < tr.openedMs) continue
                 if (n >= c.horizonBars) break
                 exitT = df.openTime[i] + Config.BAR_MS
+                if (liqFirst && (if (dr == 1) df.low[i] <= liq else df.high[i] >= liq)) {
+                    exitP = Liq.bankrupt(tr.side, tr.entry, lev); reason = "LIQUIDATED"; break
+                }
                 val hitSl = if (dr == 1) df.low[i] <= tr.sl else df.high[i] >= tr.sl
                 val hitTp = if (dr == 1) df.high[i] >= tr.tp else df.low[i] <= tr.tp
                 if (hitSl) { exitP = tr.sl; reason = "SL"; break }
@@ -237,9 +248,15 @@ class Engine(context: Context) {
         st.open.remove(tr.symbol)
         val r = if (slD > 0 && tr.qty > 0) pnl / (tr.qty * slD) else null
         store.journalUpsert(tr.copy(status = "closed", exit = exit, exitMs = exitT, reason = reason, pnl = pnl, r = r))
+        hist(c, tr, exit, exitT, pnl, reason)
         store.log("INFO", "PAPER CLOSE ${tr.symbol} ${tr.side} $reason @ ${fmt(exit)} pnl ${"%+.2f".format(Locale.US, pnl)}")
         return closedEvent(tr, reason, pnl, r)
     }
+
+    /** Trade history row (Settings > Data > Export) for an AI-engine trade. */
+    private fun hist(c: Config, tr: Trade, exit: Double?, exitT: Long, pnl: Double?, reason: String) =
+        History.record(store, History.Rec(c.mode, "AI ${tr.origin}", tr.patterns.joinToString("; "), tr.symbol, tr.side, tr.entry, exit ?: tr.entry,
+            tr.qty, tr.qty * tr.entry / c.leverage, c.leverage.toDouble(), tr.sl, tr.tp, tr.openedMs, exitT, pnl, reason))
 
     private fun closedEvent(tr: Trade, reason: String, pnl: Double?, r: Double?) = Event(
         "close", "Closed ${tr.symbol} ${tr.side}  -  $reason" + (r?.let { "  ${"%+.2f".format(Locale.US, it)}R" } ?: ""),
@@ -261,6 +278,7 @@ class Engine(context: Context) {
                 val r = if (ok && slD > 0) pnl!! / (tr.qty * slD) else null
                 store.journalUpsert(tr.copy(status = "closed", exit = if (ok) tr.entry + dr * pnl!! / tr.qty else null,
                     exitMs = api.nowMs(), reason = reason, pnl = pnl, r = r))
+                hist(c, tr, if (ok) tr.entry + dr * pnl!! / tr.qty else null, api.nowMs(), pnl, reason)
                 store.log("INFO", "CLOSED $s ${tr.side} (exchange) pnl ${pnl ?: "?"}")
                 ev += closedEvent(tr, reason, pnl, r)
                 continue
@@ -298,6 +316,7 @@ class Engine(context: Context) {
         val pnl = ex?.let { tr.qty * (dr * (it - tr.entry) - c.feeRate * (tr.entry + it)) }
         val rr = if (pnl != null && slD > 0) pnl / (tr.qty * slD) else null
         store.journalUpsert(tr.copy(status = "closed", exit = ex, exitMs = api.nowMs(), reason = reason, pnl = pnl, r = rr))
+        hist(c, tr, ex, api.nowMs(), pnl, reason)
         store.log("INFO", "CLOSE $s $reason qty $q avg ${ex ?: "?"}")
         return closedEvent(tr, reason, pnl, rr)
     }

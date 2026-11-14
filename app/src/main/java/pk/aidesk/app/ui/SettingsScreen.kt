@@ -38,6 +38,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -206,6 +207,27 @@ fun SettingsScreen(vm: AppVM, act: MainActivity) {
                 onMinus = { save(cfg.copy(dailyProfitPct = (cfg.dailyProfitPct - 1).coerceAtLeast(1.0))) },
                 onPlus = { save(cfg.copy(dailyProfitPct = cfg.dailyProfitPct + 1)) },
                 onSet = { save(vm.config.value.copy(dailyProfitPct = it.coerceAtLeast(0.5))) })
+            Stepper("Daily loss limit (USDT)", if (cfg.dailyLossUsdt > 0) "-${pctTxt(cfg.dailyLossUsdt)} USDT" else "off",
+                "Pauses auto entries when today's loss reaches this amount, whichever limit comes first. Tap to type; 0 = off.", C.Red,
+                onMinus = { save(cfg.copy(dailyLossUsdt = (cfg.dailyLossUsdt - 1).coerceAtLeast(0.0))) },
+                onPlus = { save(cfg.copy(dailyLossUsdt = cfg.dailyLossUsdt + 1)) },
+                onSet = { save(vm.config.value.copy(dailyLossUsdt = it.coerceAtLeast(0.0))) })
+            Stepper("Daily profit target (USDT)", if (cfg.dailyProfitUsdt > 0) "+${pctTxt(cfg.dailyProfitUsdt)} USDT" else "off",
+                "Pauses auto entries when today's profit reaches this amount. Tap to type; 0 = off.", C.Green,
+                onMinus = { save(cfg.copy(dailyProfitUsdt = (cfg.dailyProfitUsdt - 1).coerceAtLeast(0.0))) },
+                onPlus = { save(cfg.copy(dailyProfitUsdt = cfg.dailyProfitUsdt + 1)) },
+                onSet = { save(vm.config.value.copy(dailyProfitUsdt = it.coerceAtLeast(0.0))) })
+            T("Limits are checked every 15 minutes on the account equity. In LIVE / testnet they also pause new auto entries of the Short and Pump hunters; " +
+                "open positions keep their SL / TP.", 11.sp, C.Muted, modifier = Modifier.padding(top = 2.dp))
+
+            SectionTitle("Data (Excel and AI learning)")
+            val nHist by vm.historyCount.collectAsState()
+            LaunchedEffect(Unit) { vm.loadHistoryCount() }
+            LinkRow("Export trade history (CSV)", "$nHist recorded", C.Blue) { act.exportCsv("trades") }
+            LinkRow("Export AI signal results (CSV)", "", C.Blue) { act.exportCsv("signals") }
+            T("Every closed trade of every bot is recorded with the market before entry (24h / 3d / 7d move, volume, ATR, RSI, BTC move, " +
+                "funding, coin age) and its best / worst move while open. Older trades are included without these. Opens in Excel; " +
+                "send the file to the laptop so the AI can learn from it.", 11.sp, C.Muted, modifier = Modifier.padding(top = 2.dp))
 
             SectionTitle("Binance")
             LinkRow("API key", vm.engine.store.keyHint("live")?.let { "live $it" } ?: "not set", if (vm.engine.store.keyHint("live") != null) C.Green else C.Amber) { vm.page.value = "apikey" }

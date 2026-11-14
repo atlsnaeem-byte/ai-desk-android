@@ -538,6 +538,25 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         loadManual(); r
     }
 
+    // ------------------------------------------------------------------ data export (Settings > Data)
+    val historyCount = MutableStateFlow(0)
+    fun loadHistoryCount() = viewModelScope.launch { historyCount.value = withContext(Dispatchers.IO) { pk.aidesk.app.core.History.all(store).size } }
+
+    /** Write the chosen CSV to the file the user picked. UTF-8 with BOM so Excel opens it correctly. */
+    fun writeExport(uri: android.net.Uri, kind: String) = act {
+        withContext(Dispatchers.IO) {
+            val (text, n) = when (kind) {
+                "signals" -> store.signalLog().let { l -> pk.aidesk.app.core.History.csvOf(l.map { it.toJson() }) to l.size }
+                else -> pk.aidesk.app.core.History.csv(store)
+            }
+            getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
+                out.write(byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()))
+                out.write(text.toByteArray(Charsets.UTF_8))
+            } ?: throw pk.aidesk.app.core.UserError("Could not open the file for writing.")
+            "Exported $n ${if (kind == "signals") "signal results" else "trades"}. Open it in Excel, or send it to the laptop for the AI to learn from."
+        }
+    }
+
     fun finishSetup() {
         store.setupDone = true
         setupDone.value = true

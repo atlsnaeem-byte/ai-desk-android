@@ -357,7 +357,7 @@ class CopyBot(private val store: Store) {
     }
 
     private fun reduce(mode: String, c: CopyCfg, st: CopyState, api: Binance, pub: Binance, ck: String, cp: CopyPos, qty0: Double,
-                       reason: String, now: Long, ev: MutableList<Event>) {
+                       reason: String, now: Long, ev: MutableList<Event>, pxOverride: Double? = null) {
         val live = mode != "paper"
         val buy = cp.side == "LONG"; val dr = if (buy) 1 else -1
         val full = qty0 >= cp.qty - 1e-12
@@ -365,7 +365,7 @@ class CopyBot(private val store: Store) {
         if (qty <= 0) return
         val px: Double; val pnl: Double
         if (!live) {
-            px = pub.markPrice(cp.symbol) * (1 - dr * SLIP / 100)
+            px = pxOverride ?: (pub.markPrice(cp.symbol) * (1 - dr * SLIP / 100))
             pnl = (px - cp.entry) * qty * dr - px * qty * FEE
             st.paperEquity += pnl
         } else {
@@ -393,6 +393,8 @@ class CopyBot(private val store: Store) {
         val margin = cp.entry * cp.qty0 / cp.lev
         addJournal(mode, CopyDone(cp.leader, cp.symbol, cp.side, cp.entry, px, cp.leaderEntry, cp.slipPct, delay, cp.lev, cp.opened, now,
             reason, cp.realized, if (margin > 0) cp.realized / margin * 100 else 0.0))
+        History.record(store, History.Rec(mode, "copy", cp.leader, cp.symbol, cp.side, cp.entry, px, cp.qty0, margin, cp.lev.toDouble(),
+            null, null, cp.opened, now, cp.realized, reason))
         st.copies.remove(ck)
         log("CLOSE ${cp.side} ${cp.symbol} (${cp.leader}) $reason, PnL ${String.format(Locale.US, "%+.4f", cp.realized)}")
         ev += Event("botclose", "Copy closed ${cp.symbol} ${cp.side}  -  $reason", "${String.format(Locale.US, "%+.4f", cp.realized)} USDT  -  ${cp.leader}", false, cp.symbol)
@@ -438,7 +440,11 @@ class CopyBot(private val store: Store) {
             }
             val px = marks[cp.symbol] ?: continue
             val move = (px / cp.entry - 1) * 100 * (if (cp.side == "LONG") 1 else -1)
-            if (move <= -c.stopPct) reduce(mode, c, st, api, pub, ck, cp, cp.qty, "emergency stop ${String.format(Locale.US, "%.1f", move)}%", now, ev)
+            val liqD = Liq.distPct(cp.lev.toDouble())
+            if (move <= -liqD && liqD < c.stopPct)      // isolated margin gone before the emergency stop
+                reduce(mode, c, st, api, pub, ck, cp, cp.qty, "LIQUIDATED at ${String.format(Locale.US, "%.1f", move)}% (${cp.lev}x)", now, ev,
+                    pxOverride = Liq.bankrupt(cp.side, cp.entry, cp.lev.toDouble()))
+            else if (move <= -c.stopPct) reduce(mode, c, st, api, pub, ck, cp, cp.qty, "emergency stop ${String.format(Locale.US, "%.1f", move)}%", now, ev)
         }
     }
 

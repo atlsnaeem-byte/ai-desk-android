@@ -294,6 +294,9 @@ class ShortHunter(private val store: Store) {
             }
         }
         val held by lazy { if (live) api.positions().keys else emptySet() }
+        // Settings daily loss limit / profit target (% or USDT) pause new auto entries on the real account too
+        val paused = if (live) store.state(mode).halted else null
+        if (paused != null) { saveState(mode, st); return ev }
         fun tryOpen(s: String, exitAt: Long, sl: Double, tp: Double, rule: String, scale: Boolean) {
             try {
                 openShort(mode, api, st, s, now, exitAt, c, equityOf, sl, tp, rule, scale)?.let { ev += it }
@@ -452,6 +455,8 @@ class ShortHunter(private val store: Store) {
             if (mode == "paper") st.paperEquity += p.hedgeQty * (exit - p.hedgeEntry) - fee - fund
             addJournal(mode, ShortDone(HEDGE, p.hedgeEntry, exit, "BTC hedge for ${p.symbol}", p.opened, now, pnl,
                 if (p.margin > 0) pnl / p.margin * 100 else null, "btc hedge"))
+            History.record(store, History.Rec(mode, "btc hedge", "hedge for ${p.symbol}", HEDGE, "LONG", p.hedgeEntry, exit, p.hedgeQty, p.margin,
+                null, null, null, p.opened, now, pnl, "closed with ${p.symbol}"))
             store.log("INFO", "BTC hedge CLOSE for ${p.symbol} @ ${Engine.fmt(exit)} pnl ${String.format(Locale.US, "%+.4f", pnl)}")
             ev += Event("botclose", "BTC hedge closed (${p.symbol})", "${String.format(Locale.US, "%+.4f", pnl)} USDT", false, HEDGE)
         } catch (e: Exception) {
@@ -521,6 +526,8 @@ class ShortHunter(private val store: Store) {
 
     private fun record(mode: String, st: ShortState, p: ShortPos, exit: Double, reason: String, pnl: Double, now: Long, ev: MutableList<Event>) {
         addJournal(mode, ShortDone(p.symbol, p.entry, exit, reason, p.opened, now, pnl, if (p.margin > 0) pnl / p.margin * 100 else null, p.rule))
+        History.record(store, History.Rec(mode, "short hunter", p.rule, p.symbol, "SHORT", p.entry, exit, p.qty, p.margin,
+            if (p.margin > 0) p.qty * p.entry / p.margin else null, p.sl, p.tp, p.opened, now, pnl, reason))
         st.open.remove(p.symbol)
         store.log("INFO", "Short hunter CLOSE ${p.symbol} $reason @ ${Engine.fmt(exit)} pnl ${String.format(Locale.US, "%+.4f", pnl)}")
         ev += Event("botclose", "Short hunter closed ${p.symbol}  -  $reason", "${String.format(Locale.US, "%+.4f", pnl)} USDT", false, p.symbol)
@@ -559,6 +566,12 @@ class ShortHunter(private val store: Store) {
             if (b.getLong(0) > minOf(now, p.exitAt)) break
             val hi = b.getString(2).toDouble(); val lo = b.getString(3).toDouble()
             p.addPrice?.let { ap -> if (hi >= ap) addHalf(mode, api, st, p, ap, c) }
+            // isolated margin: a squeeze past the liquidation price wipes the margin before a wider stop is reached
+            // first half of a scale-in uses half the margin, so its real leverage is the full setting
+            val lev = (if (p.margin > 0) p.qty * p.entry / p.margin else 1.0) * (if (p.addPrice != null) 2 else 1)
+            if (Liq.beforeStop("SHORT", p.entry, lev, p.sl) && hi >= Liq.trigger("SHORT", p.entry, lev)) {
+                hit = "LIQUIDATED"; px = Liq.bankrupt("SHORT", p.entry, lev); break
+            }
             if (hi >= p.sl) { hit = "stop-loss"; px = p.sl * (1 + SLIP / 100); break }
             if (lo <= p.tp) { hit = "take-profit"; px = p.tp; break }
         }

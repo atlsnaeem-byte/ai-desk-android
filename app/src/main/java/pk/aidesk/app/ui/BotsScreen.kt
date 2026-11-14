@@ -98,6 +98,9 @@ private fun PumpsPane(vm: AppVM, act: MainActivity) {
                 Triple("Open P&L", sgn2(openPnl), pnlColor(openPnl)),
                 Triple("Closed P&L", sgn2(pnl), pnlColor(pnl)),
             ))
+            LiqWarnings(listOfNotNull(
+                pk.aidesk.app.core.Liq.warn(c.boSlPct, c.leverage, "Base breakout"),
+                pk.aidesk.app.core.Liq.warn(c.newsSlPct, c.leverage, "Listing news")))
             err?.let { Gap(6.dp); T(it, 12.sp, C.Amber) }
             Gap(6.dp)
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -263,6 +266,19 @@ private fun Kpis(items: List<Triple<String, String, Color>>) {
 }
 
 private fun pnlColor(v: Double?) = if ((v ?: 0.0) >= 0) C.Green else C.Red
+
+/** Red box: stops that sit beyond the liquidation price at the chosen leverage. */
+@Composable
+private fun LiqWarnings(w: List<String>) {
+    if (w.isEmpty()) return
+    Gap(6.dp)
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(C.RedBg).padding(10.dp)) {
+        T("Liquidation risk", 13.sp, C.Red, FontWeight.Bold)
+        for (x in w) { Gap(2.dp); T(x, 11.sp, C.Txt) }
+        Gap(2.dp)
+        T("Paper mode now simulates this: a liquidated trade loses its whole margin.", 10.sp, C.Muted)
+    }
+}
 private fun sgn1(v: Double?) = v?.let { String.format(Locale.US, "%+.1f", it) } ?: "-"
 
 @Composable
@@ -324,6 +340,10 @@ private fun ShortsPane(vm: AppVM, act: MainActivity) {
                 Triple("Open P&L", sgn2(openPnl + hedgePnl), pnlColor(openPnl + hedgePnl)),
                 Triple("Closed P&L", sgn2(pnl), pnlColor(pnl)),
             ))
+            LiqWarnings(listOfNotNull(
+                pk.aidesk.app.core.Liq.warn(c.slPct, c.leverage, "Listing short"),
+                pk.aidesk.app.core.Liq.warn(if (c.scaleIn) c.scaleStopPct else c.pumpSlPct, c.leverage, "Pump short"),
+                pk.aidesk.app.core.Liq.warn(c.annSlPct, c.leverage, "Announcement short")))
             err?.let { Gap(6.dp); T(it, 12.sp, C.Amber) }
             Gap(6.dp)
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -544,6 +564,7 @@ private fun CopyPane(vm: AppVM, act: MainActivity) {
                 Triple("Open P&L", sgn2(upnl), pnlColor(upnl)),
                 Triple("Closed P&L", sgn2(pnl), pnlColor(pnl)),
             ))
+            LiqWarnings(listOfNotNull(pk.aidesk.app.core.Liq.warn(c.stopPct, c.maxLev, "Copy emergency stop (at max leverage)")))
             Gap(6.dp)
             val sl = jr.mapNotNull { it.slipPct }
             val ds = jr.mapNotNull { it.delayS }.sorted()

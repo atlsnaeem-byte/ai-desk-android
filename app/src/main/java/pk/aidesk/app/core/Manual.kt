@@ -201,6 +201,12 @@ class ManualDesk(private val store: Store) {
             r = p.pnl?.let { pn -> val rk = abs((p.fill ?: p.entry) - p.sl) * p.qty; if (rk > 0) pn / rk else null }))
     }
 
+    private fun history(p: ManualPlan) {
+        val fill = p.fill ?: p.entry
+        History.record(store, History.Rec(p.mode, "trade tab", p.setup, p.symbol, p.side, fill, p.exit ?: fill, p.qty, p.qty * fill / p.lev,
+            p.lev.toDouble(), p.sl, p.tp, p.filledMs ?: p.created, p.exitMs ?: p.created, p.pnl, p.reason ?: ""))
+    }
+
     private fun closeNow(c: Config, api: Binance, p: ManualPlan, reason: String) {
         val pos = api.positions()[p.symbol]
         api.cancelAll(p.symbol)
@@ -218,6 +224,7 @@ class ManualDesk(private val store: Store) {
         val pnl = runCatching { api.incomeSince(p.symbol, (p.filledMs ?: p.created) - 1000) }.getOrNull()
         p.status = "closed"; p.exit = px; p.exitMs = api.nowMs(); p.reason = reason; p.pnl = pnl
         journal(p)
+        history(p)
         store.log("INFO", "Manual CLOSE ${p.symbol} ${p.side} $reason pnl ${pnl?.let { String.format(Locale.US, "%+.4f", it) } ?: "?"}")
     }
 
@@ -331,6 +338,7 @@ class ManualDesk(private val store: Store) {
         val entryFee = FEE * fill * p.qty
         p.status = "closed"; p.exit = px; p.exitMs = t; p.reason = reason; p.pnl = pnl - entryFee
         journal(p)
+        history(p)
         store.log("INFO", "PAPER manual CLOSE ${p.symbol} $reason @ ${f(px)} pnl ${String.format(Locale.US, "%+.4f", p.pnl)}")
     }
 
@@ -359,6 +367,14 @@ class ManualDesk(private val store: Store) {
                 ev += Event("open", "Paper fill: ${p.side} ${p.symbol}", "${f(p.qty)} @ ${f(fillPx)}  -  SL ${f(p.sl)}  TP ${f(p.tp)}", false, p.symbol)
             }
             if (p.status == "open") {
+                val fill = p.fill ?: p.entry
+                val lev = p.lev.toDouble()
+                val liq = Liq.trigger(p.side, fill, lev)
+                if (Liq.beforeStop(p.side, fill, lev, p.sl) && (if (p.dir == 1) lo <= liq else hi >= liq)) {
+                    paperExit(c, p, Liq.bankrupt(p.side, fill, lev), "LIQUIDATED", t + 60_000)
+                    ev += Event("close", "Paper LIQUIDATED ${p.symbol} ${p.side}", String.format(Locale.US, "%+.4f USDT (whole margin)", p.pnl ?: 0.0), true, p.symbol)
+                    return
+                }
                 val hitSl = if (p.dir == 1) lo <= p.sl else hi >= p.sl
                 val hitTp = if (p.dir == 1) hi >= p.tp else lo <= p.tp
                 if (hitSl || hitTp) {

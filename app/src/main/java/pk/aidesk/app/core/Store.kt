@@ -152,6 +152,8 @@ class Store(ctx: Context) {
             maxOpen = o.optInt("maxOpen", d.maxOpen),
             dailyLossPct = o.optDouble("dailyLossPct", d.dailyLossPct),
             dailyProfitPct = o.optDouble("dailyProfitPct", d.dailyProfitPct),
+            dailyLossUsdt = o.optDouble("dailyLossUsdt", d.dailyLossUsdt),
+            dailyProfitUsdt = o.optDouble("dailyProfitUsdt", d.dailyProfitUsdt),
             minEvR = o.optDouble("minEvR", d.minEvR),
             soundMinProb = o.optDouble("soundMinProb", d.soundMinProb),
             quietStart = o.optInt("quietStart", d.quietStart),
@@ -164,6 +166,7 @@ class Store(ctx: Context) {
             put("mode", c.mode); put("auto", c.auto); put("symbols", JSONArray(c.symbols)); put("leverage", c.leverage)
             put("marginType", c.marginType); put("riskPct", c.riskPct); put("maxOpen", c.maxOpen)
             put("dailyLossPct", c.dailyLossPct); put("dailyProfitPct", c.dailyProfitPct); put("minEvR", c.minEvR)
+            put("dailyLossUsdt", c.dailyLossUsdt); put("dailyProfitUsdt", c.dailyProfitUsdt)
             put("soundMinProb", c.soundMinProb); put("quietStart", c.quietStart); put("quietEnd", c.quietEnd)
         }
         prefs.edit().putString("config", o.toString()).apply()

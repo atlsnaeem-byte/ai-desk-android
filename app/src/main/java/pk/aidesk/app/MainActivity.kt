@@ -57,6 +57,18 @@ import pk.aidesk.app.ui.TakeSheet
 class MainActivity : FragmentActivity() {
     private val vm: AppVM by viewModels()
 
+    /** Settings > Data: "Save as" picker for the CSV exports (no storage permission needed). */
+    private var exportKind = "trades"
+    private val exportDoc = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+        if (uri != null) vm.writeExport(uri, exportKind)
+    }
+
+    fun exportCsv(kind: String) {
+        exportKind = kind
+        val day = java.time.LocalDate.now(pk.aidesk.app.core.Engine.PKT).toString()
+        exportDoc.launch("aidesk_${kind}_${vm.config.value.mode}_$day.csv")
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handle(intent)

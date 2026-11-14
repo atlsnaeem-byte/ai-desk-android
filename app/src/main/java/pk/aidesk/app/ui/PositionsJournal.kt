@@ -85,7 +85,8 @@ fun PositionsScreen(vm: AppVM) {
                     }
                     Gap(4.dp)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        T("-${cfg.dailyLossPct}% stop", 11.sp, C.Red); T("+${cfg.dailyProfitPct}% target", 11.sp, C.Green)
+                        T("-${cfg.dailyLossPct}% stop" + (if (cfg.dailyLossUsdt > 0) " · -${pctTxt(cfg.dailyLossUsdt)} USDT" else ""), 11.sp, C.Red)
+                        T("+${cfg.dailyProfitPct}% target" + (if (cfg.dailyProfitUsdt > 0) " · +${pctTxt(cfg.dailyProfitUsdt)} USDT" else ""), 11.sp, C.Green)
                     }
                     acc?.halted?.let { T("New entries paused: $it", 12.sp, C.Amber) }
                 }
