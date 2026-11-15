@@ -14,6 +14,8 @@ import kotlin.math.max
  */
 object Advisor {
     val TFS = listOf("5m", "15m", "1h", "4h")
+    const val PATTERN = "PATTERN"
+    const val SETUP = "SETUP"
     val HIGHER = mapOf("5m" to "1h", "15m" to "4h", "1h" to "4h", "4h" to "1d")
     val TF_MS = mapOf("5m" to 300_000L, "15m" to 900_000L, "1h" to 3_600_000L, "4h" to 14_400_000L, "1d" to 86_400_000L)
 
@@ -24,6 +26,7 @@ object Advisor {
         val setup: String,           // short title, e.g. "Ascending triangle breakout"
         val why: List<String>,       // reasons (+) and warnings (-)
         val score: Int,
+        val kind: String = SETUP,    // PATTERN (chart-pattern breakout/retest) | SETUP (trend pullback, TA-course setup)
     ) {
         val rr: Double get() = abs(tp - entry) / max(abs(entry - sl), 1e-12)
         val grade: String get() = when {
@@ -42,7 +45,9 @@ object Advisor {
         val plans: List<Plan>, val summary: List<String>, val time: Long, val conf: Confluence.Setup? = null,
         val supports: List<Double> = emptyList(), val resistances: List<Double> = emptyList(),
     ) {
-        val best: Plan? get() = plans.firstOrNull()
+        val best: Plan? get() = plans.firstOrNull { it.setup.startsWith("Course setup") } ?: plans.maxByOrNull { it.score }
+        val patternPlans: List<Plan> get() = plans.filter { it.kind == PATTERN }
+        val setupPlans: List<Plan> get() = plans.filter { it.kind == SETUP }
         val atr: Double get() = scan.atr.lastOrNull() ?: 0.0
     }
 
@@ -88,7 +93,7 @@ object Advisor {
         val nx = last + 1                              // line values for the next (forming) bar
 
         fun plan(side: Int, type: String, entry0: Double, sl0: Double, tp0: Double, setup: String, base: List<String>,
-                 classic: Boolean, touches: Int, retest: Boolean): Plan? {
+                 classic: Boolean, touches: Int, retest: Boolean, kind: String = PATTERN): Plan? {
             var entry = entry0; var sl = sl0; var tp = tp0
             if (type == "MARKET") entry = price
             if ((entry - sl) * side < minRisk) sl = entry - side * minRisk
@@ -116,7 +121,7 @@ object Advisor {
             if (oi != null && abs(oi) >= 10) why += "· open interest ${p1(oi)}% in 24h"
             val rr = abs(tp - entry) / abs(entry - sl)
             if (rr >= 2) { s += 1; why += "+ reward/risk ${f2(rr)}" } else if (rr < 1.2) { s -= 2; why += "- reward/risk only ${f2(rr)}" }
-            return Plan(if (side == 1) "LONG" else "SHORT", type, entry, sl, tp, setup, why, s)
+            return Plan(if (side == 1) "LONG" else "SHORT", type, entry, sl, tp, setup, why, s, kind)
         }
 
         // 1) patterns waiting for a breakout: stop order just beyond the line
@@ -156,7 +161,7 @@ object Advisor {
                 val sl = e - side * 1.5 * a
                 plan(side, "LIMIT", e, sl, e + side * 2 * abs(e - sl), "Trend pullback to EMA20",
                     listOf("· ${HIGHER[tf]} trend ${trendWord(side)}: buy the dip / sell the rally at the 20-EMA ${f(e)}"),
-                    false, 0, true)?.let { cand += it }
+                    false, 0, true, SETUP)?.let { cand += it }
             }
         }
         // 4) TA-course confluence setup on the last closed candle (RSI divergence / S-R bounce / range fade)
@@ -165,10 +170,11 @@ object Advisor {
             val side = s.side
             if ((price - s.sl) * side <= 0 || (s.tp - price) * side <= 0) null     // price already beyond a level
             else Plan(s.sideName, "MARKET", price, s.sl, s.tp, "Course setup: ${s.title}",
-                s.why + Confluence.backtestNote(tf, s.kinds), s.score)
+                s.why + Confluence.backtestNote(tf, s.kinds), s.score, SETUP)
         }
-        val plans = (listOfNotNull(confPlan) +
-            cand.sortedWith(compareByDescending<Plan> { it.score }.thenByDescending { it.rr }).distinctBy { it.setup + it.side }).take(4)
+        // chart-pattern signals and trade setups are ranked and capped separately (up to 3 each), setups first
+        val ranked = cand.sortedWith(compareByDescending<Plan> { it.score }.thenByDescending { it.rr }).distinctBy { it.setup + it.side }
+        val plans = (listOfNotNull(confPlan) + ranked.filter { it.kind == SETUP }).take(3) + ranked.filter { it.kind == PATTERN }.take(3)
 
         // plain-language summary
         val sum = ArrayList<String>()

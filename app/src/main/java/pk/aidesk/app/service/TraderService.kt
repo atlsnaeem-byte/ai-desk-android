@@ -178,6 +178,7 @@ class TraderService : Service() {
                 runShortHunter()
                 runPumpHunter()
                 runTaScan()
+                runGold()
             } finally {
                 ticks.value = System.currentTimeMillis()
                 Notifier.updateStatus(this@TraderService, engine)
@@ -199,6 +200,21 @@ class TraderService : Service() {
             sh.step(c.mode, api) { api.equity() }.forEach { Notifier.event(this, engine, it) }
         } catch (e: Exception) {
             engine.store.log("ERROR", "Short hunter: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    /** Gold signal (XAUUSDT Asian-range breakout): alert only, once per signal. */
+    private fun runGold() {
+        try {
+            val s = pk.aidesk.app.core.Gold.scan(pub)
+            if (s.status != "SIGNAL" || s.result != null) return
+            val st = engine.store
+            if (st.readObj("gold_notified.json")?.optLong("signalTime") == s.signalTime) return   // one alert per signal
+            st.writeObj("gold_notified.json", org.json.JSONObject().put("signalTime", s.signalTime))
+            Notifier.info(this, "Gold ${s.sideName} · XAUUSDT 15m",
+                    "Asian-range breakout: entry ${Engine.fmt(s.entry)}, stop ${Engine.fmt(s.sl)} (range middle), exit 01:00 PKT. Signal only, not proven.", loud = true)
+        } catch (e: Exception) {
+            engine.store.log("ERROR", "Gold signal: ${e.message ?: e.javaClass.simpleName}")
         }
     }
 

@@ -267,12 +267,23 @@ private fun CoinView(vm: AppVM, act: MainActivity, sym: String) {
                         Gap(6.dp)
                     }
                 }
-                SectionTitle("Suggested trades")
-                if (an.plans.isEmpty()) T("No clean setup on $tf right now. Try another timeframe or wait.", 13.sp, C.Muted)
             }
-            for ((i, p) in an.plans.withIndex()) item(key = "p$i${p.setup}${p.side}") {
-                SuggestionCard(p, i == sel, onSelect = { sel = i }, onUse = { sel = i; ticket.fill(p); ticket.touched = true })
-                Gap(6.dp)
+            // two separate lists: trade setups (trend pullback, TA-course) and chart-pattern signals (breakout / retest)
+            for ((kind, title, empty, note) in listOf(
+                arrayOf(Advisor.SETUP, "Trade setups", "No trade setup on $tf right now.",
+                    "Trend pullback to EMA20 and TA-course setups (RSI divergence, S/R bounce, range fade)."),
+                arrayOf(Advisor.PATTERN, "Chart pattern signals", "No chart pattern near a breakout on $tf right now.",
+                    "Breakout / retest of the drawn patterns. Backtests: no reliable edge on their own."))) {
+                item(key = "h$kind") {
+                    SectionTitle(title)
+                    T(note, 11.sp, C.Dim)
+                    Gap(4.dp)
+                    if (an.plans.none { it.kind == kind }) T(empty, 13.sp, C.Muted, modifier = Modifier.padding(bottom = 4.dp))
+                }
+                for ((i, p) in an.plans.withIndex()) if (p.kind == kind) item(key = "p$i${p.setup}${p.side}") {
+                    SuggestionCard(p, i == sel, onSelect = { sel = i }, onUse = { sel = i; ticket.fill(p); ticket.touched = true })
+                    Gap(6.dp)
+                }
             }
             item {
                 SectionTitle("Order ticket")

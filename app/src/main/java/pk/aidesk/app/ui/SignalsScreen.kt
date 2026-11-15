@@ -85,6 +85,9 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
     LaunchedEffect(ticks) { vm.loadTa(); vm.loadBreakouts() }
     val bos by vm.breakouts.collectAsState()
     LaunchedEffect(Unit) { while (true) { vm.refreshMarks(); delay(15_000) } }
+    val gold by vm.gold.collectAsState()
+    val goldErr by vm.goldErr.collectAsState()
+    LaunchedEffect(Unit) { while (true) { vm.loadGold(); delay(60_000) } }
     // A signal is closed once its stop-loss or target was hit (bar check by the scanner, or the live price since then).
     fun closedWhy(s: Signal): String? {
         log.firstOrNull { it.symbol == s.symbol && it.side == s.side && it.since == s.since }?.outcome
@@ -158,6 +161,17 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
                     ?: "No scan yet. It runs at every 15-minute close.", 11.sp, C.Dim)
                 scan?.error?.let { T(it, 12.sp, C.Amber) }
                 Gap(8.dp)
+            }
+            // ---- Gold (XAUUSDT): its own section, separate from the crypto signals
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    T("Gold · XAUUSDT 15m", 14.sp, C.Txt, FontWeight.Bold)
+                    HGap(6.dp); T("Asian-range breakout into London", 11.sp, C.Dim, modifier = Modifier.weight(1f), maxLines = 1)
+                    T("Chart", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { vm.showChart(pk.aidesk.app.core.Gold.SYMBOL) })
+                }
+                Gap(4.dp)
+                GoldCard(gold, goldErr)
+                Gap(10.dp)
             }
             // ---- TA-course setups (4h RSI divergence / range fade), from TaScanner
             fun taHit(s: TaSignal): String? {
@@ -288,6 +302,56 @@ fun SignalCard(s: Signal, onClick: () -> Unit) {
             T("TP ${px(s.tp)}", 11.sp, C.Green, mono = true)
             T("SL ${px(s.sl)}", 11.sp, C.Red, mono = true)
         }
+    }
+}
+
+@Composable
+fun GoldCard(g: pk.aidesk.app.core.Gold.Sig?, err: String?) {
+    val trendTxt = when (g?.trend) { 1 -> "4h trend up: only longs"; -1 -> "4h trend down: only shorts"; else -> "4h trend sideways: no trade" }
+    val col = if (g?.status == "SIGNAL") C.side(g.sideName) else C.Border
+    Card(border = col, faded = g?.status == "SIGNAL" && g.result != null) {
+        if (g == null) { T(err?.let { "Gold data error: $it" } ?: "Loading XAUUSDT…", 12.sp, if (err != null) C.Amber else C.Muted); return@Card }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            T("XAUUSDT", 15.sp, C.Txt, FontWeight.Bold); HGap(8.dp)
+            when (g.status) {
+                "SIGNAL" -> { Pill(g.sideName, C.side(g.sideName), filled = g.result == null); HGap(6.dp)
+                    Pill(when (g.result) { "SL" -> "stop hit"; "EXIT" -> "closed 01:00"; else -> "open" },
+                        when (g.result) { "SL" -> C.Red; "EXIT" -> C.Muted; else -> C.Green }) }
+                "WATCH" -> Pill("watching", C.Blue)
+                "FORMING" -> Pill("range forming", C.Muted)
+                "OFF" -> Pill("weekend", C.Muted)
+                else -> Pill("no signal today", C.Muted)
+            }
+            Box(Modifier.weight(1f))
+            T(px(g.price), 13.sp, C.Txt, FontWeight.SemiBold, mono = true)
+        }
+        Gap(4.dp)
+        when (g.status) {
+            "OFF" -> T("No signal on weekends. Next range: Monday 05:00–12:00 PKT.", 12.sp, C.Muted)
+            "FORMING" -> T("Asian range 05:00–12:00 PKT is forming" + (if (g.rangeHi > 0) ": ${px(g.rangeLo)} – ${px(g.rangeHi)} so far." else "."), 12.sp, C.Muted)
+            "WATCH" -> {
+                T("Range ${px(g.rangeLo)} – ${px(g.rangeHi)} · $trendTxt", 12.sp, C.Muted)
+                T(when (g.trend) {
+                    1 -> "Long if a 15m candle closes above ${px(g.rangeHi)} before 17:00 PKT · stop ${px(g.mid)}"
+                    -1 -> "Short if a 15m candle closes below ${px(g.rangeLo)} before 17:00 PKT · stop ${px(g.mid)}"
+                    else -> "Waiting: a break needs the 4h trend on its side."
+                }, 12.sp, C.Txt)
+            }
+            "SIGNAL" -> {
+                T("Closed ${if (g.side == 1) "above" else "below"} the range ${px(g.rangeLo)} – ${px(g.rangeHi)} at ${hhmm(g.signalTime)} PKT", 12.sp, C.Muted)
+                Gap(4.dp)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    T("E ${px(g.entry)}", 11.sp, C.Muted, mono = true)
+                    T("SL ${px(g.sl)}", 11.sp, C.Red, mono = true)
+                    T("exit 01:00 PKT", 11.sp, C.Muted, mono = true)
+                    val r = g.rAt(g.resultPx ?: g.price)
+                    T(String.format(java.util.Locale.US, "%+.2fR", r), 11.sp, if (r >= 0) C.Green else C.Red, mono = true)
+                }
+            }
+            else -> T("Range ${px(g.rangeLo)} – ${px(g.rangeHi)}: no close outside it with the 4h trend before 17:00 PKT.", 12.sp, C.Muted)
+        }
+        Gap(4.dp)
+        T(pk.aidesk.app.core.Gold.BACKTEST, 10.sp, C.Dim)
     }
 }
 

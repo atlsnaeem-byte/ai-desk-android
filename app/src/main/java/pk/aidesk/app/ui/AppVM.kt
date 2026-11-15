@@ -305,6 +305,18 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Gold (XAUUSDT) Asian-range breakout signal for its own section in the Signals tab. */
+    val gold = MutableStateFlow<pk.aidesk.app.core.Gold.Sig?>(null)
+    val goldErr = MutableStateFlow<String?>(null)
+    fun loadGold() = viewModelScope.launch {
+        try {
+            gold.value = withContext(Dispatchers.IO) { pk.aidesk.app.core.Gold.scan(pub) }
+            goldErr.value = null
+        } catch (e: Exception) {
+            goldErr.value = e.message ?: e.javaClass.simpleName
+        }
+    }
+
     fun loadPumps(market: Boolean = true) = viewModelScope.launch {
         pumpsLoading.value = true
         try {
