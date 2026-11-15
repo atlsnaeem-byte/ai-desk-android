@@ -73,7 +73,7 @@ class PatternsParityTest {
                     val s = if (p.side == "LONG") 1 else -1
                     assertTrue("${p.setup}: stop on wrong side", (p.entry - p.sl) * s > 0)
                     assertTrue("${p.setup}: target on wrong side", (p.tp - p.entry) * s > 0)
-                    assertEquals(true, p.type in setOf("LIMIT", "STOP", "MARKET"))
+                    assertEquals(true, p.type in setOf("LIMIT", "STOP", "MARKET", Advisor.WAIT))
                 }
             }
         }

@@ -347,7 +347,8 @@ private fun SuggestionCard(p: Advisor.Plan, selected: Boolean, onSelect: () -> U
             for (w in p.why) T(w, 11.sp, when { w.startsWith("+") -> C.Green; w.startsWith("-") -> C.Red; else -> C.Muted })
         }
         Gap(6.dp)
-        Btn("Use this in the ticket", C.Blue, outline = true, height = 36.dp) { onUse() }
+        if (p.type == Advisor.WAIT) T("Watch only: the course enters after a candle CLOSES through the line. The plan turns into a Market / Limit order here once that happens.", 11.sp, C.Amber)
+        else Btn("Use this in the ticket", C.Blue, outline = true, height = 36.dp) { onUse() }
     }
 }
 

@@ -16,6 +16,8 @@ object Advisor {
     val TFS = listOf("5m", "15m", "1h", "4h")
     const val PATTERN = "PATTERN"
     const val SETUP = "SETUP"
+    const val WAIT = "WAIT"          // plan type: watch only, no order (course: enter after a candle closes through the line)
+    val FLAGS = setOf("bull_flag", "bear_flag", "bull_pennant", "bear_pennant")
     val HIGHER = mapOf("5m" to "1h", "15m" to "4h", "1h" to "4h", "4h" to "1d")
     val TF_MS = mapOf("5m" to 300_000L, "15m" to 900_000L, "1h" to 3_600_000L, "4h" to 14_400_000L, "1d" to 86_400_000L)
 
@@ -45,7 +47,7 @@ object Advisor {
         val plans: List<Plan>, val summary: List<String>, val time: Long, val conf: Confluence.Setup? = null,
         val supports: List<Double> = emptyList(), val resistances: List<Double> = emptyList(),
     ) {
-        val best: Plan? get() = plans.firstOrNull { it.setup.startsWith("Course setup") } ?: plans.maxByOrNull { it.score }
+        val best: Plan? get() = plans.firstOrNull { it.setup.startsWith("Course setup") } ?: plans.filter { it.type != WAIT }.maxByOrNull { it.score }
         val patternPlans: List<Plan> get() = plans.filter { it.kind == PATTERN }
         val setupPlans: List<Plan> get() = plans.filter { it.kind == SETUP }
         val atr: Double get() = scan.atr.lastOrNull() ?: 0.0
@@ -124,34 +126,60 @@ object Advisor {
             return Plan(if (side == 1) "LONG" else "SHORT", type, entry, sl, tp, setup, why, s, kind)
         }
 
-        // 1) patterns waiting for a breakout: stop order just beyond the line
+        // ---- chart patterns, TA-course rules (episodes 1-3): 2+ touches on each line; wait for a candle to CLOSE through
+        // the line; stop beyond the pattern (other line, or tops / right shoulder) + 0.1 ATR; target 0.9 x measured move
+        // (flags / pennants: 0.9 x pole). Score = course checklist: higher-timeframe trend, reward/risk, retest.
+        fun target(p: Patterns.Pat, level: Double, side: Int, atrNow: Double) =
+            level + side * 0.9 * (if (p.kind in FLAGS) abs(p.pole) * atrNow else p.height)
+        fun coursePlan(side: Int, type: String, entry0: Double, sl0: Double, tp: Double, setup: String, base: List<String>,
+                       retest: Boolean): Plan? {
+            val entry = if (type == "MARKET") price else entry0
+            var sl = sl0
+            if ((entry - sl) * side < minRisk) sl = entry - side * minRisk
+            if ((tp - entry) * side <= 0) return null
+            val why = ArrayList(base); var s = 1                                  // a valid, confirmed pattern = 1 point
+            when (trendHigher) {
+                side -> { s += 2; why += "+ ${HIGHER[tf]} trend is ${trendWord(trendHigher)} (with the trade)" }
+                -side -> { s -= 2; why += "- ${HIGHER[tf]} trend is ${trendWord(trendHigher)} (against the trade)" }
+                else -> why += "· ${HIGHER[tf]} trend is sideways"
+            }
+            val rr = abs(tp - entry) / abs(entry - sl)
+            if (rr >= 1.5) { s += 1; why += "+ reward/risk ${f2(rr)}" } else if (rr < 1.0) { s -= 2; why += "- reward/risk only ${f2(rr)}" }
+            if (retest) { s += 1; why += "+ retest entry (course: better price)" }
+            return Plan(if (side == 1) "LONG" else "SHORT", type, entry, sl, tp, setup, why, s, PATTERN)
+        }
+        // 1) pattern not broken yet: WATCH (alert only). The course enters only after a candle closes through the line,
+        //    which no exchange order can do, so there is no order to place yet.
         for (p in res.active) {
+            if (p.touchUp < 2 || p.touchDn < 2) continue
             for ((side, line) in listOf(1 to p.up, -1 to p.dn)) {
                 line ?: continue
                 if (p.bias != 0 && p.bias != side) continue           // e.g. no long off a double top's neckline
                 val lv = line.at(nx)
                 if ((price - lv) * side >= 0) continue                 // already through the line: handled as breakout
-                val entry = lv + side * 0.1 * a
-                plan(side, "STOP", entry, lv - side * 1.0 * a, lv + side * p.height,
-                    "${p.name} ${if (side == 1) "breakout" else "breakdown"}",
-                    listOf("· $tf ${p.name}: ${if (side == 1) "buy" else "sell"} if price crosses ${f(entry)} (line ${f(lv)})",
-                        "· measured move = pattern height ${f(p.height)}"), p.bias == side, p.touches, false)?.let { cand += it }
+                val stop = (if (side == 1) p.stopLong else p.stopShort)?.at(nx) ?: (lv - side * p.height)
+                coursePlan(side, WAIT, lv, stop - side * 0.1 * a, target(p, lv, side, a),
+                    "${p.name}: wait for a close ${if (side == 1) "above" else "below"} ${f(lv)}",
+                    listOf("· $tf ${p.name} (${p.touchUp}+${p.touchDn} touches): course entry = after a $tf candle CLOSES ${if (side == 1) "above" else "below"} the line",
+                        "· stop beyond the pattern ${f(stop)} · target 0.9 × measured move"), false)?.let { cand += it }
             }
         }
-        // 2) fresh breakouts (last 8 candles): limit order on the retest of the broken line
-        for (b in res.breakouts.filter { it.i >= last - 8 }) {
+        // 2) confirmed breakout (a candle closed through the line in the last 3 candles):
+        //    just closed -> MARKET now; later -> LIMIT on the retest of the line (the course's optional entry)
+        for (b in res.breakouts.filter { it.i >= last - 2 && it.pat.touchUp >= 2 && it.pat.touchDn >= 2 }) {
             val side = b.side
+            if (b.pat.bias != 0 && b.pat.bias != side) continue
             val lineNow = (if (side == 1) b.pat.up else b.pat.dn)?.at(nx) ?: b.level
-            val tp = b.level + side * b.height
+            val tp = target(b.pat, b.level, side, b.atr)
             if ((price - tp) * side >= 0) continue                     // target already reached
             if ((price - (lineNow - side * 0.5 * a)) * side < 0) continue   // fell back inside: failed breakout
-            val entry = lineNow + side * 0.25 * a
-            val type = if ((price - entry) * side <= 0) "MARKET" else "LIMIT"
-            plan(side, type, entry, lineNow - side * 1.0 * a, tp,
-                "${b.pat.name} ${if (side == 1) "breakout" else "breakdown"} retest",
-                listOf("· broke ${if (side == 1) "up" else "down"} ${last - b.i + 1} candle(s) ago (volume ${f2(b.volRatio)}× average)",
-                    "· wait for price to come back to ${f(entry)}"), b.pat.bias == side || b.pat.bias == 0 && side == trendHigher,
-                b.pat.touches, true)?.let { cand += it }
+            val sl = b.other - side * 0.1 * b.atr
+            val name = "${b.pat.name} ${if (side == 1) "breakout" else "breakdown"}"
+            val base = listOf("· a $tf candle closed ${if (side == 1) "above" else "below"} the line ${last - b.i + 1} candle(s) ago (volume ${f2(b.volRatio)}× average)",
+                "· stop beyond the pattern ${f(b.other)} · target 0.9 × ${if (b.pat.kind in FLAGS) "pole" else "measured move"}")
+            if (b.i == last) coursePlan(side, "MARKET", price, sl, tp, "$name confirmed", base, false)?.let { cand += it }
+            val re = lineNow + side * 0.25 * a
+            if ((price - re) * side > 0) coursePlan(side, "LIMIT", re, sl, tp, "$name retest", base + "· wait for price to come back to ${f(re)}", true)?.let { cand += it }
         }
         // 3) no pattern: pullback to EMA20 in the direction of the higher trend
         if (trendHigher != 0) {
