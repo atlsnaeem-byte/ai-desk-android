@@ -47,6 +47,11 @@ object Btc5m {
         }
     }
 
+    @Volatile private var cached: Model? = null
+    /** The model in assets/btc5m.json, loaded once per process. */
+    fun model(ctx: android.content.Context): Model =
+        cached ?: load(ctx.assets.open("btc5m.json").bufferedReader().use { it.readText() }).also { cached = it }
+
     fun load(json: String): Model {
         val o = JSONObject(json)
         fun ints(a: JSONArray) = IntArray(a.length()) { a.getInt(it) }

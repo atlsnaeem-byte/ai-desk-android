@@ -53,6 +53,8 @@ class TraderService : Service() {
         const val ACTION_PUMPS = "pk.aidesk.PUMPS"
         /** Bumped after every manual-order watch. */
         val manualTicks = MutableStateFlow(0L)
+        /** Bumped after every BTC 5m recorder step. */
+        val btcTicks = MutableStateFlow(0L)
         val running = MutableStateFlow(false)
         @Volatile var instance: TraderService? = null
 
@@ -105,6 +107,7 @@ class TraderService : Service() {
         ensureCopyLoop()
         ensureManualLoop()
         ensurePumpLoop()
+        ensureBtc5mLoop()
         return START_STICKY
     }
 
@@ -235,6 +238,50 @@ class TraderService : Service() {
             ensurePumpLoop()
         } catch (e: Exception) {
             engine.store.log("ERROR", "Pump hunter: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    // ------------------------------------------------------------------ BTC 5m recorder (every closed minute)
+    private var btcJob: Job? = null
+    private var btcWl: PowerManager.WakeLock? = null
+
+    /** While the BTC 5m recorder is on: 3 s after every 1m close, record the round's checkpoint, auto paper bet on the first
+     *  confirmed call, alert, and settle finished rounds. Never places a live bet (Binance Prediction has no API for it). */
+    fun ensureBtc5mLoop() {
+        if (btcJob?.isActive == true) return
+        btcJob = scope.launch {
+            val book = pk.aidesk.app.core.Btc5mBook(engine.store)
+            val api = Binance()
+            var synced = 0L
+            var lastErr: String? = null
+            while (isActive) {
+                val cfg = book.cfg()
+                if (!cfg.record) break
+                val wl = btcWl ?: (getSystemService(POWER_SERVICE) as PowerManager)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aidesk:btc5m").apply { setReferenceCounted(false) }.also { btcWl = it }
+                wl.acquire(2 * 60_000L)
+                try {
+                    if (System.currentTimeMillis() - synced > 600_000) { api.syncTime(); synced = System.currentTimeMillis() }
+                    val call = pk.aidesk.app.core.Btc5m.scan(api, pk.aidesk.app.core.Btc5m.model(this@TraderService))
+                    if (book.record(call) && cfg.alerts) {
+                        val hw = call.histWin?.let { "${(it * 100).toInt()}%" } ?: "-"
+                        Notifier.info(this@TraderService, "BTC 5m CONFIRMED ${call.side} · ${call.e}:00 in",
+                            "Backtest $hw on similar rounds · ${(call.leftMs / 1000)}s left · " +
+                                (if (cfg.mode == "paper") "paper bet recorded" else "LIVE: bet in Binance only if the ${call.side} price is below ${call.histWin?.let { (it * 100 - 5).toInt() } ?: "-"}¢"),
+                            loud = true)
+                    }
+                    book.settle(api)
+                    btcTicks.value = System.currentTimeMillis()
+                    lastErr = null
+                } catch (e: Exception) {
+                    val m = (e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName
+                    if (m != lastErr) engine.store.log("ERROR", "BTC 5m recorder: $m")
+                    lastErr = m
+                }
+                val now = api.nowMs()
+                delay((60_000L - now % 60_000L) + 3_000L)     // 3 s after the next minute closes
+            }
+            btcWl?.let { if (it.isHeld) it.release() }
         }
     }
 

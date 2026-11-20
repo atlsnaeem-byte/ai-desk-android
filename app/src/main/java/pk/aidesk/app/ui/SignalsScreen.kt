@@ -171,6 +171,8 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
                 }
                 Gap(4.dp)
                 Btc5mCard(vm, now)
+                Gap(6.dp)
+                Btc5mRecordCard(vm, act)
                 Gap(10.dp)
             }
             // ---- Gold (XAUUSDT): its own section, separate from the crypto signals
@@ -385,6 +387,30 @@ fun Btc5mCard(vm: AppVM, now: Long) {
                     }
                 }
                 if (left < 25_000) T("Under 25 s left: the call may be too late to place.", 11.sp, C.Amber)
+                Gap(8.dp)
+                val bv by vm.btcView.collectAsState()
+                val bc = bv?.cfg ?: pk.aidesk.app.core.Btc5mBook.Cfg()
+                val cents = shareTxt.toDoubleOrNull()?.let { if (it <= 1) it * 100 else it }?.takeIf { it in 1.0..99.0 }
+                val already = bv?.bets?.any { it.T == c.roundStart && it.mode == bc.mode } == true
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                if (bc.mode == "paper") {
+                    Btn(if (already) "Paper bet recorded for this round" else "Paper bet ${c.side} · ${f2(bc.stake)} USDT at ${cents?.toInt() ?: bc.assumedCents.toInt()}¢" +
+                            (if (cents == null) " (assumed)" else ""), C.Blue, enabled = !already, height = 40.dp) {
+                        vm.addBtcBet("paper", c, cents, bc.stake)
+                    }
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Btn("Open in Binance", C.Amber, Modifier.weight(1f), outline = true, height = 40.dp) {
+                            runCatching { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse("https://www.binance.com/en/prediction/market-detail/btc-up-or-down-5m"))) }
+                        }
+                        Btn(if (already) "Recorded" else "I bet ${f2(bc.stake)} USDT", C.Green, Modifier.weight(1f),
+                            enabled = !already && cents != null, height = 40.dp) {
+                            vm.addBtcBet("live", c, cents, bc.stake)
+                        }
+                    }
+                    if (cents == null && !already) T("LIVE: place the bet yourself in Binance, then type the price you paid above and tap \"I bet\".", 11.sp, C.Muted)
+                }
             }
         }
         Gap(4.dp)
@@ -394,6 +420,115 @@ fun Btc5mCard(vm: AppVM, now: Long) {
                 "on ${pct0(it.oneBetShare)} of rounds. Same as \"price vs open\": the market sees it too, so only the share price decides the edge.", 10.sp, C.Dim)
         }
     }
+}
+
+@Composable
+fun Btc5mRecordCard(vm: AppVM, act: MainActivity) {
+    val v by vm.btcView.collectAsState()
+    val ticks by TraderService.btcTicks.collectAsState()
+    val running by TraderService.running.collectAsState()
+    LaunchedEffect(ticks) { vm.loadBtcBook() }
+    var showAll by remember { mutableStateOf(false) }
+    var editStake by remember { mutableStateOf<String?>(null) }
+    var editAssumed by remember { mutableStateOf<String?>(null) }
+    val bv = v ?: run { Card { T("Loading record…", 12.sp, C.Muted) }; return }
+    val cfg = bv.cfg
+    val us = java.util.Locale.US
+    Card {
+        // mode switch
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            T("Mode", 12.sp, C.Muted); HGap(8.dp)
+            Pill("PAPER", C.Blue, filled = cfg.mode == "paper") { vm.saveBtcCfg(cfg.copy(mode = "paper")) }
+            HGap(6.dp)
+            Pill("LIVE", C.Green, filled = cfg.mode == "live") {
+                if (cfg.mode != "live") act.confirmUser("Switch BTC 5m to LIVE mode") { vm.saveBtcCfg(cfg.copy(mode = "live")) }
+            }
+            Box(Modifier.weight(1f))
+            T("Recorder", 12.sp, C.Muted); HGap(4.dp)
+            androidx.compose.material3.Switch(cfg.record, { vm.saveBtcCfg(cfg.copy(record = it)) },
+                colors = androidx.compose.material3.SwitchDefaults.colors(checkedTrackColor = C.Green, checkedThumbColor = C.Txt))
+        }
+        T(when {
+            !cfg.record -> "Recorder off: calls are not saved."
+            !running -> "Recorder needs the scanner running (tap the red bar at the top)."
+            cfg.mode == "paper" -> "PAPER: every call is saved each minute; the first confirmed call of each round is paper-bet automatically."
+            else -> "LIVE: every call is saved and alerts you. You place the bet in Binance and record it here: the app never bets by itself."
+        }, 11.sp, if (cfg.record && running) C.Muted else C.Amber)
+        Gap(6.dp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Pill("Stake ${f2(cfg.stake)} USDT", C.Blue) { editStake = f2(cfg.stake) }
+            if (cfg.mode == "paper") Pill("Assumed price ${cfg.assumedCents.toInt()}¢", C.Blue) { editAssumed = cfg.assumedCents.toInt().toString() }
+            Pill(if (cfg.alerts) "Alerts on" else "Alerts off", if (cfg.alerts) C.Green else C.Muted) { vm.saveBtcCfg(cfg.copy(alerts = !cfg.alerts)) }
+        }
+        Gap(10.dp)
+        // results
+        fun rate(p: Pair<Int, Int>) = if (p.first > 0) "${pct0(p.second.toDouble() / p.first)} of ${p.first}" else "none yet"
+        KV("All calls (every minute)", rate(bv.allCalls))
+        KV("Confirmed calls", rate(bv.confirmed))
+        KV("1 confirmed call per round", rate(bv.firstConfirmed), if (bv.firstConfirmed.first > 0 && bv.firstConfirmed.second.toDouble() / bv.firstConfirmed.first < 0.85) C.Amber else C.Txt)
+        for ((label, s) in listOf("Paper" to bv.paper, "Live" to bv.live)) {
+            if (s.n == 0 && s.open == 0) continue
+            KV("$label bets", "${s.wins}/${s.n} won · ${String.format(us, "%+.2f", s.pnl)} USDT" + (if (s.open > 0) " · ${s.open} open" else ""),
+                if (s.pnl >= 0) C.Green else C.Red)
+        }
+        T("Break-even share price = the win rate of your bets. Paper bets at the assumed price are only an estimate: " +
+            "type the real price when you can. Fees are not included.", 10.sp, C.Dim)
+        Gap(8.dp)
+        // recent bets
+        val bets = if (showAll) bv.bets else bv.bets.take(8)
+        if (bets.isNotEmpty()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                T("Bets", 12.sp, C.Txt, FontWeight.Bold, modifier = Modifier.weight(1f))
+                if (bv.bets.size > 8) T(if (showAll) "Less" else "All ${bv.bets.size}", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { showAll = !showAll })
+            }
+            for (b in bets) Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                T(hhmm(b.T), 11.sp, C.Muted, mono = true); HGap(6.dp)
+                T(b.mode.uppercase(), 10.sp, if (b.mode == "live") C.Green else C.Blue, FontWeight.Bold); HGap(6.dp)
+                T("${b.side} ${b.e}:00 @${(b.share * 100).toInt()}¢${if (b.assumed) "*" else ""}", 11.sp, C.Txt, mono = true, modifier = Modifier.weight(1f))
+                val p = b.pnl
+                T(p?.let { String.format(us, "%+.2f", it) } ?: "open", 11.sp, when { p == null -> C.Muted; p >= 0 -> C.Green; else -> C.Red }, mono = true)
+                HGap(8.dp)
+                T("✕", 11.sp, C.Dim, modifier = Modifier.clickable { vm.deleteBtcBet(b.id) })
+            }
+            T("* assumed price", 10.sp, C.Dim)
+            Gap(6.dp)
+        }
+        // recent confirmed calls
+        val recent = bv.calls.filter { it.confirmed }.take(6)
+        if (recent.isNotEmpty()) {
+            T("Last confirmed calls", 12.sp, C.Txt, FontWeight.Bold)
+            for (r in recent) Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                T(hhmm(r.T), 11.sp, C.Muted, mono = true); HGap(6.dp)
+                T("${r.side} at ${r.e}:00 · ${pct0(r.conf)}", 11.sp, C.Txt, mono = true, modifier = Modifier.weight(1f))
+                T(when (r.win) { true -> "WIN"; false -> "LOSS"; null -> "…" }, 11.sp, when (r.win) { true -> C.Green; false -> C.Red; null -> C.Muted }, FontWeight.Bold)
+            }
+            Gap(6.dp)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            T("Export CSV", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { act.exportCsv("btc5m") })
+            T("Clear paper", 12.sp, C.Amber, FontWeight.SemiBold, modifier = Modifier.clickable { act.confirmUser("Delete all paper bets") { vm.clearBtc("paper") } })
+            T("Clear calls", 12.sp, C.Amber, FontWeight.SemiBold, modifier = Modifier.clickable { act.confirmUser("Delete all recorded calls") { vm.clearBtc("calls") } })
+        }
+    }
+    editStake?.let { txt ->
+        NumDialog("Stake per bet (USDT)", txt, { editStake = null }) { v -> v.takeIf { it > 0 }?.let { vm.saveBtcCfg(cfg.copy(stake = it)) } }
+    }
+    editAssumed?.let { txt ->
+        NumDialog("Assumed paper price (¢)", txt, { editAssumed = null }) { v -> v.takeIf { it in 1.0..99.0 }?.let { vm.saveBtcCfg(cfg.copy(assumedCents = it)) } }
+    }
+}
+
+@Composable
+private fun NumDialog(title: String, initial: String, onDismiss: () -> Unit, onOk: (Double) -> Unit) {
+    var t by remember { mutableStateOf(initial) }
+    androidx.compose.material3.AlertDialog(onDismissRequest = onDismiss,
+        confirmButton = { androidx.compose.material3.TextButton({ t.toDoubleOrNull()?.let(onOk); onDismiss() }) { androidx.compose.material3.Text("Save", color = C.Blue) } },
+        dismissButton = { androidx.compose.material3.TextButton(onDismiss) { androidx.compose.material3.Text("Cancel", color = C.Muted) } },
+        title = { androidx.compose.material3.Text(title) },
+        text = {
+            androidx.compose.material3.OutlinedTextField(t, { t = it.filter { ch -> ch.isDigit() || ch == '.' }.take(8) }, singleLine = true, colors = fieldColors(),
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal))
+        }, containerColor = C.Panel)
 }
 
 @Composable

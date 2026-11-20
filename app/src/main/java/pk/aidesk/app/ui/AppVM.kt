@@ -344,6 +344,33 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // BTC 5m paper / live record (the service records every minute; the UI reads and adds bets)
+    val btcBook by lazy { pk.aidesk.app.core.Btc5mBook(store) }
+    class BtcView(val cfg: pk.aidesk.app.core.Btc5mBook.Cfg, val bets: List<pk.aidesk.app.core.Btc5mBook.Bet>,
+                  val calls: List<pk.aidesk.app.core.Btc5mBook.CallRow>,
+                  val paper: pk.aidesk.app.core.Btc5mBook.Stats, val live: pk.aidesk.app.core.Btc5mBook.Stats,
+                  val allCalls: Pair<Int, Int>, val confirmed: Pair<Int, Int>, val firstConfirmed: Pair<Int, Int>)
+    val btcView = MutableStateFlow<BtcView?>(null)
+    fun loadBtcBook() = viewModelScope.launch {
+        btcView.value = withContext(Dispatchers.IO) {
+            val b = btcBook
+            BtcView(b.cfg(), b.bets().reversed(), b.calls().reversed(), b.stats("paper"), b.stats("live"),
+                b.callStats(false), b.callStats(true), b.firstConfirmedStats())
+        }
+    }
+    fun saveBtcCfg(c: pk.aidesk.app.core.Btc5mBook.Cfg) = viewModelScope.launch {
+        withContext(Dispatchers.IO) { btcBook.saveCfg(c) }
+        if (c.record) TraderService.start(getApplication())
+        loadBtcBook()
+    }
+    fun addBtcBet(mode: String, call: pk.aidesk.app.core.Btc5m.Call, cents: Double?, stake: Double) = viewModelScope.launch {
+        withContext(Dispatchers.IO) { btcBook.addBet(mode, call.roundStart, call.e, call.side, cents, stake) }
+        toast.value = "${if (mode == "live") "Live" else "Paper"} bet recorded: ${call.side} ${cents?.let { "at ${it.toInt()}¢" } ?: "at the assumed price"}, ${stake} USDT"
+        loadBtcBook()
+    }
+    fun deleteBtcBet(id: Long) = viewModelScope.launch { withContext(Dispatchers.IO) { btcBook.deleteBet(id) }; loadBtcBook() }
+    fun clearBtc(what: String) = viewModelScope.launch { withContext(Dispatchers.IO) { btcBook.clear(what) }; loadBtcBook() }
+
     fun loadPumps(market: Boolean = true) = viewModelScope.launch {
         pumpsLoading.value = true
         try {
@@ -585,14 +612,15 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     fun writeExport(uri: android.net.Uri, kind: String) = act {
         withContext(Dispatchers.IO) {
             val (text, n) = when (kind) {
-                "signals" -> store.signalLog().let { l -> pk.aidesk.app.core.History.csvOf(l.map { it.toJson() }) to l.size }
+                "btc5m" -> btcBook.csv().let { it to (it.count { ch -> ch == '\n' } - 1) }
+                "signals" ->store.signalLog().let { l -> pk.aidesk.app.core.History.csvOf(l.map { it.toJson() }) to l.size }
                 else -> pk.aidesk.app.core.History.csv(store)
             }
             getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
                 out.write(byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()))
                 out.write(text.toByteArray(Charsets.UTF_8))
             } ?: throw pk.aidesk.app.core.UserError("Could not open the file for writing.")
-            "Exported $n ${if (kind == "signals") "signal results" else "trades"}. Open it in Excel, or send it to the laptop for the AI to learn from."
+            "Exported $n ${when (kind) { "signals" -> "signal results"; "btc5m" -> "BTC 5m calls and bets"; else -> "trades" }}. Open it in Excel, or send it to the laptop for the AI to learn from."
         }
     }
 
