@@ -27,7 +27,7 @@ class Btc5mBook(private val store: Store) {
         }
     }
 
-    class CallRow(val t: Long, val T: Long, val e: Int, val side: String, val conf: Double, val threshold: Double?, val confirmed: Boolean,
+    class CallRow(val at: Long, val T: Long, val e: Int, val side: String, val conf: Double, val threshold: Double?, val confirmed: Boolean,
                   val histWin: Double?, val open: Double, val price: Double, val up: Int?)   // up: 1 / 0 once settled
     { val win get() = up?.let { (it == 1) == (side == "UP") } }
 
