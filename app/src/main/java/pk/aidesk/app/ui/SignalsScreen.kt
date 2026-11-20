@@ -162,6 +162,17 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
                 scan?.error?.let { T(it, 12.sp, C.Amber) }
                 Gap(8.dp)
             }
+            // ---- BTC Up/Down 5m (Binance Prediction rounds): confirmed calls only
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    T("BTC Up/Down · 5m rounds", 14.sp, C.Txt, FontWeight.Bold)
+                    HGap(6.dp); T("confirmed calls only", 11.sp, C.Dim, modifier = Modifier.weight(1f), maxLines = 1)
+                    T("Chart", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { vm.showChart(pk.aidesk.app.core.Btc5m.SYMBOL) })
+                }
+                Gap(4.dp)
+                Btc5mCard(vm, now)
+                Gap(10.dp)
+            }
             // ---- Gold (XAUUSDT): its own section, separate from the crypto signals
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -301,6 +312,86 @@ fun SignalCard(s: Signal, onClick: () -> Unit) {
             T("E ${px(s.entry)}", 11.sp, C.Muted, mono = true)
             T("TP ${px(s.tp)}", 11.sp, C.Green, mono = true)
             T("SL ${px(s.sl)}", 11.sp, C.Red, mono = true)
+        }
+    }
+}
+
+@Composable
+fun Btc5mCard(vm: AppVM, now: Long) {
+    val call by vm.btc5m.collectAsState()
+    val err by vm.btc5mErr.collectAsState()
+    // refresh every 5 s while the tab is open (new closed minute = new checkpoint)
+    LaunchedEffect(Unit) { while (true) { vm.loadBtc5m(); delay(5_000) } }
+    var shareTxt by remember { mutableStateOf("") }
+    // short beep once per new confirmed call
+    var beeped by remember { mutableStateOf("") }
+    val c = call
+    LaunchedEffect(c?.roundStart, c?.e, c?.confirmed) {
+        if (c != null && c.confirmed) {
+            val key = "${c.roundStart}/${c.side}"
+            if (beeped != key) {
+                beeped = key
+                runCatching {
+                    val tg = android.media.ToneGenerator(android.media.AudioManager.STREAM_NOTIFICATION, 80)
+                    tg.startTone(android.media.ToneGenerator.TONE_PROP_BEEP2, 300)
+                    delay(500); tg.release()
+                }
+            }
+        }
+    }
+    val col = if (c?.confirmed == true) C.side(if (c.side == "UP") "LONG" else "SHORT") else C.Border
+    Card(border = col) {
+        if (c == null) { T(err?.let { "BTC data error: $it" } ?: "Loading BTCUSDT 1m…", 12.sp, if (err != null) C.Amber else C.Muted); return@Card }
+        val left = c.roundStart + pk.aidesk.app.core.Btc5m.ROUND - now
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            T("${hhmm(c.roundStart)}–${hhmm(c.roundStart + pk.aidesk.app.core.Btc5m.ROUND)}", 15.sp, C.Txt, FontWeight.Bold, mono = true)
+            HGap(8.dp)
+            when {
+                c.confirmed -> Pill("CONFIRMED ${c.side}", if (c.side == "UP") C.Green else C.Red, filled = true)
+                c.e == 0 -> Pill("WAIT · before round", C.Muted)
+                else -> Pill("WAIT", C.Blue)
+            }
+            Box(Modifier.weight(1f))
+            T(mmss(left), 15.sp, if (left < 25_000) C.Amber else C.Txt, FontWeight.SemiBold, mono = true)
+        }
+        Gap(4.dp)
+        val mv = c.moveBps
+        T("Open ${px(c.open)} → now ${px(c.price)} (${String.format(java.util.Locale.US, "%+.1f", mv)} bps) · ${c.e}:00 closed",
+            12.sp, if (mv >= 0) C.Green else C.Red)
+        val m = vm.btc5mModel
+        when {
+            c.e == 0 -> T("No call before the round: the backtest was 51% (a coin flip). First check at ${hhmm(c.roundStart + 60_000)} PKT.", 12.sp, C.Muted)
+            c.pUp == null -> T("Not enough 1m history yet.", 12.sp, C.Amber)
+            !c.confirmed -> T("Leaning ${c.side} ${pct0(c.conf!!)}, needs ${c.threshold?.let { pct0(it) } ?: "-"} at ${c.e}:00 to confirm. " +
+                (if (c.e < 4) "Next check ${hhmm(c.nextCheck)}:00 PKT." else "No more checks this round."), 12.sp, C.Muted)
+            else -> {
+                T("${c.side} ${pct0(c.conf!!)} · backtest ${c.histWin?.let { pct0(it) } ?: "-"} won on ${c.histN} similar rounds", 13.sp, C.Txt, FontWeight.SemiBold)
+                Gap(6.dp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.OutlinedTextField(shareTxt, { shareTxt = it.filter { ch -> ch.isDigit() || ch == '.' }.take(5) },
+                        singleLine = true, colors = fieldColors(), modifier = Modifier.width(130.dp),
+                        label = { androidx.compose.material3.Text("${c.side} price ¢") },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal))
+                    HGap(10.dp)
+                    val share = shareTxt.toDoubleOrNull()?.let { if (it > 1) it / 100 else it }?.takeIf { it in 0.01..0.99 }
+                    val edge = share?.let { c.edge(it) }
+                    Column(Modifier.weight(1f)) {
+                        if (edge == null || share == null) T("Enter the ${c.side} share price. Bet only if it is below ${c.histWin?.let { "${(it * 100 - 5).toInt()}¢" } ?: "-"}.", 12.sp, C.Muted)
+                        else {
+                            T(if (edge >= 5) "BET · edge ${String.format(java.util.Locale.US, "%+.0f", edge)} pts" else "SKIP · priced in (${String.format(java.util.Locale.US, "%+.0f", edge)} pts)",
+                                14.sp, if (edge >= 5) C.Green else C.Amber, FontWeight.Bold)
+                            T("Win ${c.histWin?.let { pct0(it) }} vs pay ${(share * 100).toInt()}¢ → ${String.format(java.util.Locale.US, "%+.1f", (c.histWin!! / share - 1) * 100)}% per bet on average", 11.sp, C.Muted)
+                        }
+                    }
+                }
+                if (left < 25_000) T("Under 25 s left: the call may be too late to place.", 11.sp, C.Amber)
+            }
+        }
+        Gap(4.dp)
+        m?.let {
+            T("Backtest ${it.days} days (walk-forward, Binance spot 1m): every round at 1/2/3/4 min wins " +
+                (1..4).joinToString("/") { e -> pct0(it.allWin[e] ?: 0.0) } + "; one confirmed bet per round wins ${pct0(it.oneBetWin)} " +
+                "on ${pct0(it.oneBetShare)} of rounds. Same as \"price vs open\": the market sees it too, so only the share price decides the edge.", 10.sp, C.Dim)
         }
     }
 }

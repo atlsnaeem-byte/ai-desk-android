@@ -317,6 +317,33 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** BTC Up/Down 5m (Binance Prediction rounds): confirmed calls only, refreshed every few seconds by the Signals tab. */
+    val btc5m = MutableStateFlow<pk.aidesk.app.core.Btc5m.Call?>(null)
+    val btc5mErr = MutableStateFlow<String?>(null)
+    var btc5mModel: pk.aidesk.app.core.Btc5m.Model? = null
+        private set
+    private var btc5mSynced = 0L
+    private var btc5mBusy = false
+    fun loadBtc5m() {
+        if (btc5mBusy) return
+        btc5mBusy = true
+        viewModelScope.launch {
+            try {
+                btc5m.value = withContext(Dispatchers.IO) {
+                    val m = btc5mModel ?: pk.aidesk.app.core.Btc5m.load(
+                        getApplication<Application>().assets.open("btc5m.json").bufferedReader().use { it.readText() }).also { btc5mModel = it }
+                    if (System.currentTimeMillis() - btc5mSynced > 600_000) { pub.syncTime(); btc5mSynced = System.currentTimeMillis() }
+                    pk.aidesk.app.core.Btc5m.scan(pub, m)
+                }
+                btc5mErr.value = null
+            } catch (e: Exception) {
+                btc5mErr.value = e.message ?: e.javaClass.simpleName
+            } finally {
+                btc5mBusy = false
+            }
+        }
+    }
+
     fun loadPumps(market: Boolean = true) = viewModelScope.launch {
         pumpsLoading.value = true
         try {
