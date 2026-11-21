@@ -312,12 +312,23 @@ class TraderService : Service() {
                     if (System.currentTimeMillis() - synced > 600_000) { api.syncTime(); synced = System.currentTimeMillis() }
                     val m = pk.aidesk.app.core.Btc5mStruct.model(this@TraderService)
                     val call = pk.aidesk.app.core.Btc5mStruct.scan(api, m, cfg.thr)
-                    if (book.record(call) && cfg.alerts) {
-                        Notifier.info(this@TraderService, "BTC 5m ${call.side} · P(UP) ${(call.pUp * 100).toInt()}% · round ${pk.aidesk.app.core.Engine.fmt(call.open)}",
-                            (if (cfg.mode == "paper") "Paper bet ${cfg.stake} USDT placed at ${cfg.paperCents.toInt()}¢. "
-                             else "LIVE: bet ${call.side} in Binance now, only if the share costs ≤ 52¢. ") +
-                                "${call.leftMs / 1000}s left in the round.", loud = cfg.mode == "live")
+                    val isNew = book.recordRound(call)
+                    val pred = engine.store.keys("prediction")?.let { (k, s) -> pk.aidesk.app.core.PredictionApi(k, s) }
+                    if (isNew) {
+                        // same decision path for PAPER and LIVE: quote -> EV gate -> risk -> execute; re-quote every 8 s in the window
+                        var step = book.tryEnter(call, cfg, pred, api.nowMs())
+                        while (!step.done && api.nowMs() - call.roundStart < cfg.windowSec * 1000L) {
+                            book.setStatus(step.text); structTicks.value = System.currentTimeMillis()
+                            delay(8_000)
+                            step = book.tryEnter(call, book.cfg(), pred, api.nowMs())
+                        }
+                        book.setStatus("${hhmmUtc(call.roundStart)} ${call.side} · ${step.text}")
+                        if (cfg.alerts && (step.placed || cfg.mode == "live"))
+                            Notifier.info(this@TraderService, "BTC 5m ${call.side} · win rate ${(call.winP * 100).toInt()}%" +
+                                (if (step.placed) " · ${cfg.mode.uppercase()} BET" else " · skipped"), step.text, loud = cfg.mode == "live" && step.placed)
                     }
+                    // LIVE: claim winnings of ended rounds once per round (PredictAI 5m maintenance)
+                    if (cfg.mode == "live" && pred != null) runCatching { pred.claimAll(pred.wallet()) }
                     book.settle(api)
                     structTicks.value = System.currentTimeMillis()
                     lastErr = null
@@ -333,6 +344,9 @@ class TraderService : Service() {
             structWl?.let { if (it.isHeld) it.release() }
         }
     }
+
+    private fun hhmmUtc(t: Long) = java.time.format.DateTimeFormatter.ofPattern("HH:mm").withZone(pk.aidesk.app.core.Engine.PKT)
+        .format(java.time.Instant.ofEpochMilli(t))
 
     // ------------------------------------------------------------------ strategies (Strategies tab): auto-trade loop
     private var stratJob: Job? = null

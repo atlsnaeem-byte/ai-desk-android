@@ -32,9 +32,19 @@ object Btc5mStruct {
              val dd: Double, val trades: Int)
 
     class Model(val up: Gbdt, val yClose: Gbdt, val yHigh: Gbdt, val yLow: Gbdt, val threshold: Double, val k: Int,
-                val testStart: String, val testEnd: String, val days: Int, val backtest: List<Bt>) {
+                val testStart: String, val testEnd: String, val days: Int, val backtest: List<Bt>,
+                val calConf: DoubleArray = doubleArrayOf(0.5, 1.0), val calP: DoubleArray = doubleArrayOf(0.5, 0.5)) {
         fun pUp(x: DoubleArray) = 1.0 / (1.0 + exp(-up.raw(x)))
         fun bt(thr: Double) = backtest.minByOrNull { kotlin.math.abs(it.thr - thr) }
+        /** Out-of-sample win rate of the called side at this model confidence (isotonic, 6-month backtest). */
+        fun winProb(conf: Double): Double {
+            if (conf <= calConf.first()) return calP.first()
+            if (conf >= calConf.last()) return calP.last()
+            var i = 0
+            while (i < calConf.size - 2 && conf > calConf[i + 1]) i++
+            val t = (conf - calConf[i]) / (calConf[i + 1] - calConf[i])
+            return calP[i] + (calP[i + 1] - calP[i]) * t
+        }
     }
 
     @Volatile private var cached: Model? = null
@@ -59,8 +69,10 @@ object Btc5mStruct {
             Bt(it.getDouble("thr"), it.getDouble("per_day"), it.getDouble("win"), it.getDouble("pnl50"), it.getDouble("pnl52"),
                 it.getDouble("pnl55"), it.getDouble("dd"), it.getInt("trades"))
         }
+        val cal = o.optJSONObject("calibration")
         return Model(gb("up"), gb("y_close"), gb("y_high"), gb("y_low"), o.getDouble("threshold"), o.getInt("swing_k"),
-            o.getString("test_start"), o.getString("test_end"), o.getInt("days"), bt)
+            o.getString("test_start"), o.getString("test_end"), o.getInt("days"), bt,
+            cal?.let { dbls(it.getJSONArray("conf")) } ?: doubleArrayOf(0.5, 1.0), cal?.let { dbls(it.getJSONArray("p")) } ?: doubleArrayOf(0.5, 0.5))
     }
 
     /** OHLC bars of one timeframe (open times ascending). */
@@ -156,6 +168,8 @@ object Btc5mStruct {
     ) {
         val side get() = if (pUp >= threshold) "UP" else if (pUp <= 1 - threshold) "DOWN" else "NONE"
         val conf get() = if (pUp >= 0.5) pUp else 1 - pUp
+        /** backtest win rate for this confidence (set by evaluate) */
+        var winP: Double = 0.5
         val leftMs get() = roundStart + ROUND - now
         val moveBps get() = (price / open - 1) * 1e4
     }
@@ -172,6 +186,7 @@ object Btc5mStruct {
         val form = if (fi >= 0) doubleArrayOf(b5.o[fi], maxOf(b5.h[fi], livePrice), minOf(b5.l[fi], livePrice), livePrice) else null
         return Call(now, T, open, livePrice, p, threshold,
             open + m.yClose.raw(x) * atr, open + m.yHigh.raw(x) * atr, open + m.yLow.raw(x) * atr, st, b5.upTo(T), form)
+            .also { it.winP = m.winProb(it.conf) }
     }
 
     /** 36 features for round T from bars of each TF (only bars closed by T are used). Order = structure.FEATURES. */

@@ -104,10 +104,15 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
         if (c.side != "NONE") {
             Gap(6.dp)
             val already = bv?.bets?.any { it.T == c.roundStart && it.mode == cfg.mode } == true
-            if (cfg.mode == "paper") {
-                T(if (already) "Paper bet placed: ${c.side} ${f2(cfg.stake)} USDT at ${cfg.paperCents.toInt()}¢ (auto)."
-                  else if (cfg.auto) "Auto paper bet happens at the round start (within 30 s)." else "Auto is off: no paper bet this round.",
-                    11.sp, if (already) C.Green else C.Muted)
+            val maxPx = c.winP / (1.02 * (1 + cfg.minEdgePct / 100))
+            T("Backtest win rate at this confidence ${String.format(US, "%.1f", c.winP * 100)}% · buys only if the ${c.side} share costs " +
+                "≤ ${String.format(US, "%.1f", maxPx * 100)}¢ (2% fee, edge ≥ ${cfg.minEdgePct}%)" +
+                (if (c.winP < cfg.minP) " · below min win rate ${String.format(US, "%.1f", cfg.minP * 100)}%: skipped" else ""), 11.sp, C.Muted)
+            bv?.rounds?.firstOrNull { it.T == c.roundStart }?.note?.takeIf { it.isNotBlank() }?.let {
+                T("This round: $it", 11.sp, if (already) C.Green else C.Amber)
+            }
+            if (cfg.mode == "paper" || cfg.armed) {
+                if (!already && !cfg.auto) T("Auto is off: no bet this round.", 11.sp, C.Muted)
             } else {
                 var shareTxt by remember(c.roundStart) { mutableStateOf("") }
                 val ctx = LocalContext.current
@@ -220,30 +225,84 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
             Column(Modifier.weight(1f)) {
                 T("Auto (every round)", 14.sp, C.Txt, FontWeight.Bold)
                 T(when {
-                    !cfg.auto -> "OFF: no calls are recorded and no paper bets are placed."
+                    !cfg.auto -> "OFF: no calls are recorded and no bets are placed."
                     !running -> "Needs the scanner running: tap the red bar on the Signals tab."
-                    cfg.mode == "paper" -> "ON · PAPER: each call is bet automatically (${f2(cfg.stake)} USDT at ${cfg.paperCents.toInt()}¢)."
-                    else -> "ON · LIVE: alert with sound on each call. You bet in Binance and tap \"I bet\": the app cannot bet for you."
-                }, 11.sp, if (cfg.auto && running) C.Green else C.Amber)
+                    cfg.mode == "paper" -> "ON · PAPER: each call goes through the same quote + edge check as LIVE; no order is sent."
+                    cfg.armed -> "ON · LIVE ARMED: the app places real Binance Prediction orders when the edge check passes."
+                    else -> "ON · LIVE NOT ARMED: alerts only. Tap ARM LIVE below to let the app place orders."
+                }, 11.sp, when { !cfg.auto || !running -> C.Amber; cfg.mode == "live" && cfg.armed -> C.Red; else -> C.Green })
             }
             Switch(cfg.auto, { vm.saveStructCfg(cfg.copy(auto = it)) },
                 colors = SwitchDefaults.colors(checkedTrackColor = C.Green, checkedThumbColor = C.Txt))
         }
+        bv.status.takeIf { it.second.isNotBlank() }?.let { (t, s) -> T("Last: ${hhmm(t)} · $s", 11.sp, C.Txt) }
+        bv.risk?.let { T("Blocked: $it", 11.sp, C.Red, FontWeight.Bold) }
         Gap(6.dp)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             T("Mode", 12.sp, C.Muted)
-            Pill("PAPER", C.Blue, filled = cfg.mode == "paper") { vm.saveStructCfg(cfg.copy(mode = "paper")) }
+            Pill("PAPER", C.Blue, filled = cfg.mode == "paper") { vm.saveStructCfg(cfg.copy(mode = "paper", armed = false)) }
             Pill("LIVE", C.Green, filled = cfg.mode == "live") {
-                if (cfg.mode != "live") act.confirmUser("Switch BTC 5m structure AI to LIVE alerts") { vm.saveStructCfg(cfg.copy(mode = "live")) }
+                if (cfg.mode != "live") act.confirmUser("Switch BTC 5m structure AI to LIVE (still needs ARM LIVE to place orders)") { vm.saveStructCfg(cfg.copy(mode = "live")) }
             }
             Box(Modifier.weight(1f))
             Pill(if (cfg.alerts) "Alerts on" else "Alerts off", if (cfg.alerts) C.Green else C.Muted) { vm.saveStructCfg(cfg.copy(alerts = !cfg.alerts)) }
+        }
+        if (cfg.mode == "live") {
+            Gap(6.dp)
+            Btn(if (cfg.armed) "DISARM LIVE" else "ARM LIVE · real orders", if (cfg.armed) C.Red else C.Green, height = 40.dp,
+                enabled = cfg.armed || bv.keyHint != null) {
+                if (cfg.armed) vm.saveStructCfg(cfg.copy(armed = false))
+                else act.confirmUser("ARM LIVE: the app will place real Binance Prediction orders of ${f2(maxOf(cfg.stake, 1.5))} USDT") {
+                    vm.saveStructCfg(cfg.copy(armed = true, stake = maxOf(cfg.stake, 1.5)))
+                }
+            }
+            if (bv.keyHint == null) T("Save a Prediction API key first (below).", 11.sp, C.Amber)
         }
         Gap(6.dp)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Pill("Stake ${f2(cfg.stake)} USDT", C.Blue) { edit = "stake" to f2(cfg.stake) }
             Pill("Paper price ${cfg.paperCents.toInt()}¢", C.Blue) { edit = "cents" to cfg.paperCents.toInt().toString() }
+            Pill(if (cfg.useQuotes) "Paper: real quotes" else "Paper: paper price", C.Blue) { vm.saveStructCfg(cfg.copy(useQuotes = !cfg.useQuotes)) }
         }
+        Gap(8.dp)
+        // ---- edge gate (PredictAI V7.3.0)
+        T("Edge check (same for PAPER and LIVE)", 12.sp, C.Txt, FontWeight.Bold)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            T("Min win rate", 11.sp, C.Muted)
+            for (p in listOf(0.515, 0.52, 0.525, 0.53, 0.535)) Pill(String.format(US, "%.1f%%", p * 100), C.Blue, filled = kotlin.math.abs(cfg.minP - p) < 1e-6) { vm.saveStructCfg(cfg.copy(minP = p)) }
+        }
+        Gap(4.dp)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            T("Min edge", 11.sp, C.Muted)
+            for (e in listOf(0.0, 1.0, 2.0, 3.0, 5.0)) Pill("${e.toInt()}%", C.Blue, filled = cfg.minEdgePct == e) { vm.saveStructCfg(cfg.copy(minEdgePct = e)) }
+        }
+        Gap(4.dp)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            T("Entry window", 11.sp, C.Muted)
+            for (s in listOf(20, 30, 45, 60, 90)) Pill(String.format(US, "%d:%02d", s / 60, s % 60), C.Blue, filled = cfg.windowSec == s) {
+                vm.saveStructCfg(cfg.copy(windowSec = s))
+            }
+        }
+        T("A bet goes in only if: win rate ≥ min, and win rate × shares − cost ≥ min edge × cost, using the real Binance quote " +
+            "(cost includes the 2% fee). The quote is re-checked every 8 s until the window closes.", 10.sp, C.Dim)
+        Gap(8.dp)
+        // ---- hard limits
+        T("Hard limits", 12.sp, C.Txt, FontWeight.Bold)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Pill("Daily loss ${if (cfg.dailyLossUsdt > 0) f2(cfg.dailyLossUsdt) + " USDT" else "off"}", C.Amber) { edit = "loss" to f2(cfg.dailyLossUsdt) }
+            Pill("Max ${if (cfg.maxTradesDay > 0) cfg.maxTradesDay.toString() else "∞"}/day", C.Amber) { edit = "trades" to cfg.maxTradesDay.toString() }
+            Pill("Pause after ${if (cfg.lossStreak > 0) cfg.lossStreak.toString() else "-"} losses", C.Amber) { edit = "streak" to cfg.lossStreak.toString() }
+        }
+        Gap(4.dp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            T(if (cfg.killSwitch) "KILL SWITCH ON · no new bets" else "Kill switch off", 12.sp, if (cfg.killSwitch) C.Red else C.Muted, FontWeight.Bold,
+                modifier = Modifier.weight(1f))
+            Switch(cfg.killSwitch, { vm.saveStructCfg(cfg.copy(killSwitch = it)) },
+                colors = SwitchDefaults.colors(checkedTrackColor = C.Red, checkedThumbColor = C.Txt))
+        }
+        Gap(8.dp)
+        // ---- Prediction API key
+        PredKeyBox(vm, bv.keyHint)
         Gap(8.dp)
         T("Call threshold (backtest ${m?.testStart ?: ""} → ${m?.testEnd ?: ""}, ${m?.days ?: 180} days, $1 per call)", 12.sp, C.Txt, FontWeight.Bold)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -264,10 +323,12 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         stat("Paper today", bv.paperToday)
         stat("Paper all", bv.paper)
         if (bv.paper.n > 0) KV("Paper max drop", "${f2(bv.paper.maxDd)} USDT", C.Muted)
-        stat("Live bets", bv.live)
+        stat("Live today", bv.liveToday)
+        stat("Live all", bv.live)
         KV("All calls (rounds)", if (bv.calls.first > 0) "${bv.calls.second}/${bv.calls.first} right (${String.format(us, "%.1f", 100.0 * bv.calls.second / bv.calls.first)}%)" else "none yet")
-        T("Break-even win rate = share price. Paper bets use the paper price, so type the real price you see in Binance into " +
-            "\"Paper price\" for a fair test. Fees are not included.", 10.sp, C.Dim)
+        T("Prices include the 2% fee. Break-even win rate = price paid per share. Paper uses real Binance quotes when a " +
+            "Prediction key is saved (no order is sent), else the paper price. Settled from Binance spot (the market uses Chainlink; " +
+            "near-ties can differ); a tie pays half.", 10.sp, C.Dim)
         Gap(8.dp)
         val bets = if (showAll) bv.bets.take(300) else bv.bets.take(10)
         if (bets.isNotEmpty()) {
@@ -278,7 +339,8 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
             for (b in bets) Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                 T(hhmm(b.T), 11.sp, C.Muted, mono = true); HGap(6.dp)
                 T(b.mode.uppercase(), 10.sp, if (b.mode == "live") C.Green else C.Blue, FontWeight.Bold); HGap(6.dp)
-                T("${b.side} @${(b.share * 100).toInt()}¢ · ${f2(b.stake)}", 11.sp, sideCol(b.side), mono = true, modifier = Modifier.weight(1f))
+                T("${b.side} @${String.format(us, "%.1f", b.share * 100)}¢ · ${f2(b.stake)}" + (if (b.status != "OK") " · ${b.status}" else ""),
+                    11.sp, if (b.status != "OK") C.Amber else sideCol(b.side), mono = true, modifier = Modifier.weight(1f))
                 val p = b.pnl
                 T(p?.let { String.format(us, "%+.2f", it) } ?: "open", 11.sp, when { p == null -> C.Muted; p >= 0 -> C.Green; else -> C.Red }, mono = true)
                 HGap(8.dp)
@@ -297,16 +359,55 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         AlertDialog(onDismissRequest = { edit = null },
             confirmButton = { TextButton({
                 t.toDoubleOrNull()?.let { x ->
-                    if (what == "stake" && x > 0) vm.saveStructCfg(cfg.copy(stake = x))
-                    if (what == "cents" && x in 1.0..99.0) vm.saveStructCfg(cfg.copy(paperCents = x))
+                    when {
+                        what == "stake" && x > 0 -> vm.saveStructCfg(cfg.copy(stake = if (cfg.mode == "live") maxOf(x, 1.5) else x))
+                        what == "cents" && x in 1.0..99.0 -> vm.saveStructCfg(cfg.copy(paperCents = x))
+                        what == "loss" && x >= 0 -> vm.saveStructCfg(cfg.copy(dailyLossUsdt = x))
+                        what == "trades" && x >= 0 -> vm.saveStructCfg(cfg.copy(maxTradesDay = x.toInt()))
+                        what == "streak" && x >= 0 -> vm.saveStructCfg(cfg.copy(lossStreak = x.toInt()))
+                    }
                 }
                 edit = null
             }) { Text("Save", color = C.Blue) } },
             dismissButton = { TextButton({ edit = null }) { Text("Cancel", color = C.Muted) } },
-            title = { Text(if (what == "stake") "Stake per bet (USDT)" else "Paper share price (¢)") },
+            title = { Text(when (what) { "stake" -> "Stake per bet (USDT, LIVE min 1.5)"; "cents" -> "Paper share price (¢)"
+                "loss" -> "Daily loss limit (USDT, 0 = off)"; "trades" -> "Max bets per day (0 = off)"; else -> "Pause 60 min after N losses in a row (0 = off)" }) },
             text = {
                 OutlinedTextField(t, { t = it.filter { ch -> ch.isDigit() || ch == '.' }.take(6) }, singleLine = true, colors = fieldColors(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
             })
+    }
+}
+
+/** Binance Prediction API key (separate from the futures key): Reading + Prediction Trading, withdrawals OFF. */
+@Composable
+private fun PredKeyBox(vm: AppVM, hint: String?) {
+    val info by vm.predInfo.collectAsState()
+    var open by remember { mutableStateOf(false) }
+    var k by remember { mutableStateOf("") }
+    var s by remember { mutableStateOf("") }
+    LaunchedEffect(hint) { if (hint != null && info == null) vm.testPred() }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        T("Prediction API key", 12.sp, C.Txt, FontWeight.Bold, modifier = Modifier.weight(1f))
+        T(hint ?: "not set", 12.sp, if (hint != null) C.Green else C.Amber, mono = true)
+        HGap(10.dp)
+        T(if (open) "Close" else if (hint == null) "Add" else "Change", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { open = !open })
+    }
+    info?.let { T(it, 11.sp, if (it.startsWith("Connected")) C.Green else if (it.startsWith("Checking")) C.Muted else C.Red) }
+    if (open) {
+        T("Use a NEW Binance API key with only Reading + Prediction Trading enabled and withdrawals OFF. It is stored encrypted " +
+            "on this phone. An IP-restricted key works only from that IP.", 10.sp, C.Amber)
+        OutlinedTextField(k, { k = it.trim() }, singleLine = true, colors = fieldColors(), modifier = Modifier.fillMaxWidth(), label = { Text("API key") })
+        OutlinedTextField(s, { s = it.trim() }, singleLine = true, colors = fieldColors(), modifier = Modifier.fillMaxWidth(), label = { Text("Secret") },
+            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
+        Gap(4.dp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Btn("Save + test", C.Green, Modifier.weight(1f), enabled = k.length > 10 && s.length > 10, height = 38.dp) {
+                vm.savePredKeys(k, s); k = ""; s = ""; open = false
+            }
+            if (hint != null) Btn("Remove", C.Red, Modifier.weight(1f), outline = true, height = 38.dp) { vm.clearPredKeys(); open = false }
+        }
+    } else if (hint != null) {
+        T("Test connection", 11.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { vm.testPred() })
     }
 }

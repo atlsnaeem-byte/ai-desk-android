@@ -491,13 +491,41 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     class StructView(val cfg: pk.aidesk.app.core.Btc5mStructBook.Cfg, val bets: List<pk.aidesk.app.core.Btc5mStructBook.Bet>,
                      val rounds: List<pk.aidesk.app.core.Btc5mStructBook.RoundRow>,
                      val paper: pk.aidesk.app.core.Btc5mStructBook.Stats, val paperToday: pk.aidesk.app.core.Btc5mStructBook.Stats,
-                     val live: pk.aidesk.app.core.Btc5mStructBook.Stats, val calls: Pair<Int, Int>)
+                     val live: pk.aidesk.app.core.Btc5mStructBook.Stats, val calls: Pair<Int, Int>,
+                     val liveToday: pk.aidesk.app.core.Btc5mStructBook.Stats, val status: Pair<Long, String>, val keyHint: String?,
+                     val risk: String?)
     val structView = MutableStateFlow<StructView?>(null)
     fun loadStructBook() = viewModelScope.launch {
         structView.value = withContext(Dispatchers.IO) {
             val b = structBook
             val day = System.currentTimeMillis().let { it - (it + 5 * 3_600_000L) % 86_400_000L }     // midnight PKT
-            StructView(b.cfg(), b.bets().reversed(), b.rounds().reversed(), b.stats("paper"), b.stats("paper", day), b.stats("live"), b.callStats())
+            val cfg = b.cfg()
+            StructView(cfg, b.bets().reversed(), b.rounds().reversed(), b.stats("paper"), b.stats("paper", day), b.stats("live"), b.callStats(),
+                b.stats("live", day), b.status(), store.keyHint("prediction"), b.riskBlock(cfg, cfg.mode, System.currentTimeMillis()))
+        }
+    }
+    /** Binance Prediction API (separate key: Reading + Prediction Trading, withdrawals off). */
+    val predInfo = MutableStateFlow<String?>(null)
+    fun savePredKeys(key: String, secret: String) = viewModelScope.launch {
+        withContext(Dispatchers.IO) { store.saveKeys("prediction", key, secret) }
+        loadStructBook(); testPred()
+    }
+    fun clearPredKeys() = viewModelScope.launch { withContext(Dispatchers.IO) { store.clearKeys("prediction") }; predInfo.value = null; loadStructBook() }
+    fun testPred() = viewModelScope.launch {
+        predInfo.value = "Checking…"
+        predInfo.value = withContext(Dispatchers.IO) {
+            runCatching {
+                val (k, s) = store.keys("prediction") ?: return@runCatching "No Prediction API key saved."
+                val api = pk.aidesk.app.core.PredictionApi(k, s)
+                api.syncTime()
+                val w = api.wallet()
+                val bal = api.balances()
+                val wb = runCatching { api.walletBalance(w) }.getOrNull()
+                val r = runCatching { api.apiRestrictions() }.getOrNull()
+                val warn = r?.let { if (it.optBoolean("enableWithdrawals")) " · WARNING: withdrawals are ENABLED on this key" else "" } ?: ""
+                "Connected · wallet ${w.address.take(6)}…${w.address.takeLast(4)} · prediction ${wb?.let { f2(it) } ?: "-"} USDT · " +
+                    bal.filter { it.enabled }.joinToString(" · ") { "${it.accountType} ${f2(it.balance)}" } + warn
+            }.getOrElse { e -> "Failed: ${(e as? pk.aidesk.app.core.BinanceException)?.msg ?: e.message}" }
         }
     }
     fun saveStructCfg(c: pk.aidesk.app.core.Btc5mStructBook.Cfg) = viewModelScope.launch {
