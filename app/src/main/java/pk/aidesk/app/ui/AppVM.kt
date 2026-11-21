@@ -461,6 +461,59 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     fun deleteBtcBet(id: Long) = viewModelScope.launch { withContext(Dispatchers.IO) { btcBook.deleteBet(id) }; loadBtcBook() }
     fun clearBtc(what: String) = viewModelScope.launch { withContext(Dispatchers.IO) { btcBook.clear(what) }; loadBtcBook() }
 
+    // BTC 5m structure AI (HH/HL/LH/LL on 1m/5m/15m -> one call at each round start) + its paper / live record
+    val structCall = MutableStateFlow<pk.aidesk.app.core.Btc5mStruct.Call?>(null)
+    val structErr = MutableStateFlow<String?>(null)
+    var structModel: pk.aidesk.app.core.Btc5mStruct.Model? = null
+        private set
+    private var s5Busy = false
+    private var structSynced = 0L
+    fun loadStruct() {
+        if (s5Busy) return
+        s5Busy = true
+        viewModelScope.launch {
+            try {
+                structCall.value = withContext(Dispatchers.IO) {
+                    val m = structModel ?: pk.aidesk.app.core.Btc5mStruct.load(
+                        getApplication<Application>().assets.open("btc5m_struct.json").bufferedReader().use { it.readText() }).also { structModel = it }
+                    if (System.currentTimeMillis() - structSynced > 600_000) { pub.syncTime(); structSynced = System.currentTimeMillis() }
+                    pk.aidesk.app.core.Btc5mStruct.scan(pub, m, structBook.cfg().thr)
+                }
+                structErr.value = null
+            } catch (e: Exception) {
+                structErr.value = e.message ?: e.javaClass.simpleName
+            } finally {
+                s5Busy = false
+            }
+        }
+    }
+    val structBook by lazy { pk.aidesk.app.core.Btc5mStructBook(store) }
+    class StructView(val cfg: pk.aidesk.app.core.Btc5mStructBook.Cfg, val bets: List<pk.aidesk.app.core.Btc5mStructBook.Bet>,
+                     val rounds: List<pk.aidesk.app.core.Btc5mStructBook.RoundRow>,
+                     val paper: pk.aidesk.app.core.Btc5mStructBook.Stats, val paperToday: pk.aidesk.app.core.Btc5mStructBook.Stats,
+                     val live: pk.aidesk.app.core.Btc5mStructBook.Stats, val calls: Pair<Int, Int>)
+    val structView = MutableStateFlow<StructView?>(null)
+    fun loadStructBook() = viewModelScope.launch {
+        structView.value = withContext(Dispatchers.IO) {
+            val b = structBook
+            val day = System.currentTimeMillis().let { it - (it + 5 * 3_600_000L) % 86_400_000L }     // midnight PKT
+            StructView(b.cfg(), b.bets().reversed(), b.rounds().reversed(), b.stats("paper"), b.stats("paper", day), b.stats("live"), b.callStats())
+        }
+    }
+    fun saveStructCfg(c: pk.aidesk.app.core.Btc5mStructBook.Cfg) = viewModelScope.launch {
+        withContext(Dispatchers.IO) { structBook.saveCfg(c) }
+        if (c.auto) TraderService.start(getApplication())
+        loadStructBook()
+        loadStruct()
+    }
+    fun addStructBet(mode: String, call: pk.aidesk.app.core.Btc5mStruct.Call, cents: Double?, stake: Double) = viewModelScope.launch {
+        withContext(Dispatchers.IO) { structBook.addBet(mode, call.roundStart, call.side, cents, stake) }
+        toast.value = "${if (mode == "live") "Live" else "Paper"} bet recorded: ${call.side} ${cents?.let { "at ${it.toInt()}¢" } ?: "at the paper price"}, $stake USDT"
+        loadStructBook()
+    }
+    fun deleteStructBet(id: Long) = viewModelScope.launch { withContext(Dispatchers.IO) { structBook.deleteBet(id) }; loadStructBook() }
+    fun clearStruct(what: String) = viewModelScope.launch { withContext(Dispatchers.IO) { structBook.clear(what) }; loadStructBook() }
+
     fun loadPumps(market: Boolean = true) = viewModelScope.launch {
         pumpsLoading.value = true
         try {
@@ -703,6 +756,7 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         withContext(Dispatchers.IO) {
             val (text, n) = when (kind) {
                 "btc5m" -> btcBook.csv().let { it to (it.count { ch -> ch == '\n' } - 1) }
+                "btc5ms" -> structBook.csv().let { it to (it.count { ch -> ch == '\n' } - 1) }
                 "signals" ->store.signalLog().let { l -> pk.aidesk.app.core.History.csvOf(l.map { it.toJson() }) to l.size }
                 else -> pk.aidesk.app.core.History.csv(store)
             }
@@ -710,7 +764,7 @@ class AppVM(app: Application) : AndroidViewModel(app) {
                 out.write(byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()))
                 out.write(text.toByteArray(Charsets.UTF_8))
             } ?: throw pk.aidesk.app.core.UserError("Could not open the file for writing.")
-            "Exported $n ${when (kind) { "signals" -> "signal results"; "btc5m" -> "BTC 5m calls and bets"; else -> "trades" }}. Open it in Excel, or send it to the laptop for the AI to learn from."
+            "Exported $n ${when (kind) { "signals" -> "signal results"; "btc5m" -> "BTC 5m calls and bets"; "btc5ms" -> "BTC 5m structure rounds and bets"; else -> "trades" }}. Open it in Excel, or send it to the laptop for the AI to learn from."
         }
     }
 
