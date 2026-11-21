@@ -108,6 +108,7 @@ class TraderService : Service() {
         ensureManualLoop()
         ensurePumpLoop()
         ensureBtc5mLoop()
+        ensureStratLoop()
         return START_STICKY
     }
 
@@ -285,6 +286,38 @@ class TraderService : Service() {
         }
     }
 
+    // ------------------------------------------------------------------ strategies (Strategies tab): auto-trade loop
+    private var stratJob: Job? = null
+    private var stratWl: PowerManager.WakeLock? = null
+
+    /** Every 5-minute close + 6 s while a strategy's auto-trade is on: new signals -> trade with a 5-target ladder; time exits. */
+    fun ensureStratLoop() {
+        if (stratJob?.isActive == true) return
+        stratJob = scope.launch {
+            val book = pk.aidesk.app.core.StratBook(engine.store)
+            val api = Binance()
+            var synced = 0L
+            while (isActive) {
+                if (!book.anyAuto()) break
+                val wl = stratWl ?: (getSystemService(POWER_SERVICE) as PowerManager)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aidesk:strats").apply { setReferenceCounted(false) }.also { stratWl = it }
+                wl.acquire(3 * 60_000L)
+                try {
+                    if (System.currentTimeMillis() - synced > 600_000) { api.syncTime(); synced = System.currentTimeMillis() }
+                    val c = engine.cfg()
+                    val ev = book.step(c, api) { engine.client(c) }
+                    ev.forEach { Notifier.event(this@TraderService, engine, it) }
+                    if (ev.isNotEmpty()) { ticks.value = System.currentTimeMillis(); ensureManualLoop() }
+                } catch (e: Exception) {
+                    engine.store.log("ERROR", "Strategies: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")
+                }
+                if (stratWl?.isHeld == true) stratWl?.release()
+                val now = api.nowMs()
+                delay((300_000L - now % 300_000L) + 6_000L)
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ pump hunter: listing-news loop
     private var pumpJob: Job? = null
     private var pumpWl: PowerManager.WakeLock? = null
@@ -344,7 +377,7 @@ class TraderService : Service() {
                 if (sg.symbol in busy) { engine.store.log("INFO", "Course ${sg.symbol}: skip, coin already held by another bot"); continue }
                 try {
                     val msg = desk.place(c, trade, pk.aidesk.app.core.Ticket(sg.symbol, sg.side, "MARKET", 0.0, sg.sl, sg.tp, c.riskPct,
-                        c.leverage, 24, "Course ${sg.tf}: ${sg.title}"))
+                        c.leverage, 24, "Course ${sg.tf}: ${sg.title}", ladder = true))
                     Notifier.event(this, engine, pk.aidesk.app.core.Event("open", "Course trade opened: ${sg.side} ${sg.symbol}", msg, true, sg.symbol))
                 } catch (e: Exception) {
                     val m = (e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName

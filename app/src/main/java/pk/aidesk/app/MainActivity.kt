@@ -179,6 +179,8 @@ private fun MainNav(vm: AppVM, act: MainActivity) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when (tab) {
                     "trade" -> pk.aidesk.app.ui.TradeScreen(vm, act)
+                    "strats" -> pk.aidesk.app.ui.StrategiesScreen(vm, act)
+                    "predict" -> pk.aidesk.app.ui.PredictionScreen(vm, act)
                     "positions" -> PositionsScreen(vm)
                     "journal" -> JournalScreen(vm)
                     "bots" -> BotsScreen(vm, act)
@@ -201,16 +203,16 @@ private fun MainNav(vm: AppVM, act: MainActivity) {
 @Composable
 private fun BottomNav(tab: String, onTab: (String) -> Unit) {
     Row(Modifier.fillMaxWidth().background(C.Panel).padding(vertical = 6.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-        for ((k, label) in listOf("signals" to "Signals", "trade" to "Trade", "positions" to "Positions", "bots" to "Bots",
-                "journal" to "Journal", "settings" to "Settings")) {
+        for ((k, label) in listOf("signals" to "Signals", "strats" to "Strategy", "predict" to "Predict", "trade" to "Trade",
+                "positions" to "Positions", "bots" to "Bots", "journal" to "Journal", "settings" to "Settings")) {
             val on = k == tab
             Column(Modifier.clip(RoundedCornerShape(10.dp)).clickable { onTab(k) }.padding(horizontal = 4.dp, vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(Modifier.clip(RoundedCornerShape(50)).background(if (on) androidx.compose.ui.graphics.Color(0xFF1D3A5C) else C.Panel)
-                    .padding(horizontal = 12.dp, vertical = 5.dp)) {
+                    .padding(horizontal = 9.dp, vertical = 5.dp)) {
                     Box(Modifier.size(7.dp).clip(CircleShape).background(if (on) C.Txt else C.Muted))
                 }
-                T(label, 11.sp, if (on) C.Txt else C.Muted, if (on) FontWeight.SemiBold else FontWeight.Normal)
+                T(label, 10.sp, if (on) C.Txt else C.Muted, if (on) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
             }
         }
     }

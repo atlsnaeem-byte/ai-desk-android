@@ -305,6 +305,63 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ------------------------------------------------------------------ Strategies tab
+    val stratBook by lazy { pk.aidesk.app.core.StratBook(store) }
+    val strat = MutableStateFlow(pk.aidesk.app.core.StratBook.RBF)
+    val stratAuto = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val stratSigs = MutableStateFlow<List<pk.aidesk.app.core.StratSig>>(emptyList())
+    val rbf = MutableStateFlow<pk.aidesk.app.core.Rbf.View?>(null)
+    val rbfErr = MutableStateFlow<String?>(null)
+
+    fun loadStrats() = viewModelScope.launch {
+        stratAuto.value = withContext(Dispatchers.IO) { pk.aidesk.app.core.StratBook.ALL.associate { it.id to stratBook.auto(it.id) } }
+        stratSigs.value = withContext(Dispatchers.IO) { stratBook.signals().sortedByDescending { it.time } }
+    }
+
+    fun setStratAuto(id: String, on: Boolean) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { stratBook.setAuto(id, on) }
+            if (id == pk.aidesk.app.core.StratBook.COURSE) taAuto.value = on
+            if (on) TraderService.start(getApplication())
+            toast.value = if (on) "${pk.aidesk.app.core.StratBook.info(id).name}: auto-trade ON (${config.value.mode.uppercase()})" else "Auto-trade off"
+            loadStrats()
+        }
+    }
+
+    fun loadRbf() = viewModelScope.launch {
+        try {
+            val v = withContext(Dispatchers.IO) { pk.aidesk.app.core.Rbf.scan(pub) }
+            rbf.value = v; rbfErr.value = null
+            withContext(Dispatchers.IO) { stratBook.record(stratBook.rbfSignals(v)) }
+            loadStrats()
+        } catch (e: Exception) { rbfErr.value = e.message ?: e.javaClass.simpleName }
+    }
+
+    /** Manual trade from a strategy / signal card: MARKET now, the signal's stop, 5 targets (1/5 at each). */
+    fun stratTrade(symbol: String, side: String, sl: Double, setup: String, sigId: String?) = act {
+        val r = withContext(Dispatchers.IO) {
+            val c = engine.cfg(); val api = engine.client(c); api.syncTime()
+            desk.place(c, api, pk.aidesk.app.core.Ticket(symbol, side, "MARKET", 0.0, sl, 0.0, c.riskPct, c.leverage, 24, setup, ladder = true))
+        }
+        sigId?.let { withContext(Dispatchers.IO) { stratBook.markTraded(it) } }
+        TraderService.start(getApplication(), TraderService.ACTION_MANUAL)
+        loadManual(); loadStrats(); r
+    }
+
+    // position tools (trades opened from the app: Trade tab, strategies, course auto trades)
+    fun closePart(symbol: String, pct: Double, done: () -> Unit = {}) = act {
+        val r = withContext(Dispatchers.IO) { val c = engine.cfg(); val api = engine.client(c); api.syncTime(); desk.closePart(c, api, symbol, pct) }
+        loadManual(); done(); r
+    }
+    fun dca(symbol: String, usdt: Double, done: () -> Unit = {}) = act {
+        val r = withContext(Dispatchers.IO) { val c = engine.cfg(); val api = engine.client(c); api.syncTime(); desk.addToPosition(c, api, symbol, usdt) }
+        loadManual(); done(); r
+    }
+    fun addMargin(symbol: String, usdt: Double, done: () -> Unit = {}) = act {
+        val r = withContext(Dispatchers.IO) { val c = engine.cfg(); val api = engine.client(c); api.syncTime(); desk.addMargin(c, api, symbol, usdt) }
+        loadManual(); done(); r
+    }
+
     /** Gold (XAUUSDT) Asian-range breakout signal for its own section in the Signals tab. */
     val gold = MutableStateFlow<pk.aidesk.app.core.Gold.Sig?>(null)
     val goldErr = MutableStateFlow<String?>(null)

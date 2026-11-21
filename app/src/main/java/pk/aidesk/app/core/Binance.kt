@@ -298,6 +298,23 @@ class Binance(private val key: String? = null, private val secret: String? = nul
         }
     }
 
+    /** Reduce-only STOP_MARKET / TAKE_PROFIT_MARKET for part of the position (one target of a ladder). */
+    fun reduceTrigger(symbol: String, side: String, kind: String, trigger: String, qty: String): Any {
+        val b = mapOf("symbol" to symbol, "side" to side, "type" to kind, "quantity" to qty, "reduceOnly" to "true", "workingType" to "MARK_PRICE")
+        return try {
+            signed("POST", "/fapi/v1/algoOrder", b + mapOf("algoType" to "CONDITIONAL", "triggerPrice" to trigger))
+        } catch (e1: BinanceException) {
+            try {
+                signed("POST", "/fapi/v1/order", b + mapOf("stopPrice" to trigger))
+            } catch (e2: BinanceException) {
+                throw BinanceException(e2.status, e2.code, "algo: ${e1.msg} | legacy: ${e2.msg}")
+            }
+        }
+    }
+
+    /** Add isolated margin to a position (type 1 = add). */
+    fun addMargin(symbol: String, amount: String) = signed("POST", "/fapi/v1/positionMargin", mapOf("symbol" to symbol, "amount" to amount, "type" to 1))
+
     fun cancelAll(symbol: String) {
         for (p in listOf("/fapi/v1/allOpenOrders", "/fapi/v1/algoOpenOrders")) {
             runCatching { signed("DELETE", p, mapOf("symbol" to symbol)) }

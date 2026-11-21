@@ -1,4 +1,4 @@
-﻿package pk.aidesk.app.ui
+package pk.aidesk.app.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -50,6 +50,7 @@ import pk.aidesk.app.TopBar
 import pk.aidesk.app.core.Config
 import pk.aidesk.app.core.Signal
 import pk.aidesk.app.core.TaSignal
+import pk.aidesk.app.core.Targets
 import pk.aidesk.app.service.TraderService
 import kotlin.math.abs
 import kotlin.math.max
@@ -85,9 +86,6 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
     LaunchedEffect(ticks) { vm.loadTa(); vm.loadBreakouts() }
     val bos by vm.breakouts.collectAsState()
     LaunchedEffect(Unit) { while (true) { vm.refreshMarks(); delay(15_000) } }
-    val gold by vm.gold.collectAsState()
-    val goldErr by vm.goldErr.collectAsState()
-    LaunchedEffect(Unit) { while (true) { vm.loadGold(); delay(60_000) } }
     // A signal is closed once its stop-loss or target was hit (bar check by the scanner, or the live price since then).
     fun closedWhy(s: Signal): String? {
         log.firstOrNull { it.symbol == s.symbol && it.side == s.side && it.since == s.since }?.outcome
@@ -162,28 +160,11 @@ fun SignalsScreen(vm: AppVM, act: MainActivity) {
                 scan?.error?.let { T(it, 12.sp, C.Amber) }
                 Gap(8.dp)
             }
-            // ---- BTC Up/Down 5m (Binance Prediction rounds): confirmed calls only
+            // BTC Up/Down 5m moved to the Predict tab; gold strategies to the Strategy tab
             item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    T("BTC Up/Down · 5m rounds", 14.sp, C.Txt, FontWeight.Bold)
-                    HGap(6.dp); T("confirmed calls only", 11.sp, C.Dim, modifier = Modifier.weight(1f), maxLines = 1)
-                    T("Chart", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { vm.showChart(pk.aidesk.app.core.Btc5m.SYMBOL) })
+                Card(onClick = { vm.tab.value = "strats" }) {
+                    T("Gold strategies (Retest + Breaker + FVG, Asian-range breakout) → Strategy tab · BTC 5m rounds → Predict tab", 12.sp, C.Blue)
                 }
-                Gap(4.dp)
-                Btc5mCard(vm, now)
-                Gap(6.dp)
-                Btc5mRecordCard(vm, act)
-                Gap(10.dp)
-            }
-            // ---- Gold (XAUUSDT): its own section, separate from the crypto signals
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    T("Gold · XAUUSDT 15m", 14.sp, C.Txt, FontWeight.Bold)
-                    HGap(6.dp); T("Asian-range breakout into London", 11.sp, C.Dim, modifier = Modifier.weight(1f), maxLines = 1)
-                    T("Chart", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { vm.showChart(pk.aidesk.app.core.Gold.SYMBOL) })
-                }
-                Gap(4.dp)
-                GoldCard(gold, goldErr)
                 Gap(10.dp)
             }
             // ---- TA-course setups (4h RSI divergence / range fade), from TaScanner
@@ -602,12 +583,8 @@ fun TaCard(s: TaSignal, mark: Double?, hit: String?, onClick: () -> Unit) {
         T(s.title, 13.sp, C.Txt, FontWeight.SemiBold)
         s.why.firstOrNull()?.let { T(it.removePrefix("+ "), 11.sp, C.Muted, maxLines = 2) }
         Gap(6.dp)
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            T("E ${px(s.entry)}", 11.sp, C.Muted, mono = true)
-            T("TP ${px(s.tp)}", 11.sp, C.Green, mono = true)
-            T("SL ${px(s.sl)}", 11.sp, C.Red, mono = true)
-            T("R:R ${f2(s.rr)}", 11.sp, C.Amber, mono = true)
-        }
+        T("Entry ${px(s.entry)} · 5 targets (1R–5R), 1/5 closes at each", 11.sp, C.Muted, mono = true)
+        TargetsRow(s.side, s.entry, s.sl, mark?.let { m -> Targets.ladder(s.side, s.entry, s.sl).count { (m - it) * s.dir >= 0 } })
         val r = s.r ?: mark?.let { s.dir * (it - s.entry) / abs(s.entry - s.sl) }
         r?.let {
             Gap(4.dp)

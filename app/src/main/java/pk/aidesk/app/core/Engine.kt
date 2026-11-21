@@ -503,7 +503,12 @@ class Engine(context: Context) {
                 if ((tp - mark) * dr <= 0) throw UserError("Take-profit must be ${if (dr == 1) "above" else "below"} the current price ${fmt(mark)} for a $side.")
                 var newSl = sl; var newTp = tp
                 var note = ""
-                if (live) {
+                if (live && manPos?.ladder == true) {
+                    if (livePos == null) throw UserError("No open $symbol position on Binance.")
+                    newSl = api.fmtPrice(symbol, sl).first; newTp = api.fmtPrice(symbol, tp).first
+                    desk.setExits(mode, symbol, newSl, newTp)
+                    desk.rearmSymbol(mode, api, symbol)
+                } else if (live) {
                     if (livePos == null) throw UserError("No open $symbol position on Binance.")
                     newSl = api.fmtPrice(symbol, sl).first; newTp = api.fmtPrice(symbol, tp).first
                     val exitSide = if (dr == 1) "SELL" else "BUY"
@@ -581,9 +586,9 @@ class Engine(context: Context) {
             } + man.map { p ->
                 val mk = marks[p.symbol]
                 val fill = p.fill ?: p.entry
-                val u = if (mk != null) p.qty * p.dir * (mk - fill) else 0.0
+                val u = if (mk != null) p.qtyLeft * p.dir * (mk - fill) else 0.0
                 upnl += u
-                Position(p.symbol, p.side, p.qty, fill, mk, u, p.sl, p.tp, p.filledMs, true, "manual")
+                Position(p.symbol, p.side, p.qtyLeft, fill, mk, u, p.sl, p.tp, p.filledMs, true, "manual")
             } + botPos
             return Account(c.mode, st.equity + upnl, st.equity, upnl, ps, st.dayStart, st.halted)
         }
