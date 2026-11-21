@@ -142,7 +142,7 @@ fun StrategiesScreen(vm: AppVM, act: MainActivity) {
                 Gap(10.dp)
             }
             // every open signal, all strategies (Crypto Signals AI layout)
-            val openSigs = sigs.filter { it.result == null && now - it.time < 26 * 3_600_000L }
+            val openSigs = sigs.filter { it.result == null && now - it.time < 26 * 3_600_000L && it.strat != StratBook.STRUCT }
             val openTa = ta.filter { it.active }
             item { SectionTitle("Open signals (${openSigs.size + openTa.size})") }
             if (openSigs.isEmpty() && openTa.isEmpty()) item {
@@ -166,6 +166,19 @@ fun StrategiesScreen(vm: AppVM, act: MainActivity) {
             }
             item { SectionTitle("Now · ${info.name}") }
             when (sel) {
+                StratBook.STRUCT -> {
+                    item { StructPanel(vm) }
+                    val ms = sigs.filter { it.strat == StratBook.STRUCT && it.result == null && now - it.time < 24 * 3_600_000L }
+                        .sortedByDescending { it.time }.take(40)
+                    item { T("Open structure signals: ${ms.size}${if (ms.size == 40) " (newest 40)" else ""}", 12.sp, C.Txt, FontWeight.SemiBold); Gap(6.dp) }
+                    items(ms, key = { "ms" + it.id }) { s ->
+                        val name = StratBook.info(s.strat).name
+                        SignalCard(SigView(s.symbol, s.side, s.entry, s.sl, s.time, s.tpHit, s.result, s.traded), marks[s.symbol], cfg.leverage, ex, now,
+                            onTrade = if (s.traded) null else ({ confirm = PendingTrade("Trade $name", s.symbol, s.side, s.sl, "Strategy $name", s.id) }),
+                            onChart = { vm.showChart(s.symbol) })
+                        Gap(10.dp)
+                    }
+                }
                 StratBook.RBF -> item { RbfNow(vm) { e -> confirm = PendingTrade("Trade ${info.name}", "XAUUSDT", e.sideName, e.sl, "Strategy ${info.name}", e.id) } }
                 StratBook.ASIA -> item {
                     val g by vm.gold.collectAsState(); val ge by vm.goldErr.collectAsState()

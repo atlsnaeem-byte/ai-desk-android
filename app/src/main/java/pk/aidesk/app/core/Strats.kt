@@ -22,6 +22,23 @@ data class ExitCfg(val tp1Only: Boolean = false, val step: Double = 1.0) {
     }
 }
 
+/** Market structure scanner settings (strat_cfg.json "_struct"). top 0 = all USDT perps. */
+data class StructCfg(val k: Int = 10, val setups: Set<String> = setOf("BOS", "CHOCH"), val long: Boolean = true, val short: Boolean = true,
+                     val filter4h: Boolean = true, val top: Int = 0) {
+    fun toJson(): JSONObject = JSONObject().put("k", k).put("setups", JSONArray(setups.toList())).put("long", long).put("short", short)
+        .put("filter4h", filter4h).put("top", top)
+
+    companion object {
+        fun from(o: JSONObject?): StructCfg {
+            if (o == null) return StructCfg()
+            val d = StructCfg()
+            return StructCfg(o.optInt("k", d.k).takeIf { it in listOf(3, 5, 10) } ?: d.k,
+                o.optJSONArray("setups")?.let { a -> (0 until a.length()).map { a.getString(it) }.toSet() } ?: d.setups,
+                o.optBoolean("long", true), o.optBoolean("short", true), o.optBoolean("filter4h", true), o.optInt("top", 0))
+        }
+    }
+}
+
 /** One strategy in the Strategies tab (dropdown). */
 class StratInfo(val id: String, val name: String, val market: String, val rules: String, val backtest: String, val targets: String)
 
@@ -45,8 +62,12 @@ class StratSig(val strat: String, val id: String, val symbol: String, val side: 
  */
 class StratBook(val store: Store) {
     companion object {
-        const val RBF = "rbf_gold"; const val ASIA = "asia_gold"; const val COURSE = "course_4h"
+        const val RBF = "rbf_gold"; const val ASIA = "asia_gold"; const val COURSE = "course_4h"; const val STRUCT = "structure_15m"
         private val LOCK = Any()
+        /** 4h candles per coin for the structure trend filter, refreshed after each 4h close. */
+        private val h4Cache = java.util.concurrent.ConcurrentHashMap<String, Candles>()
+        private var universeCache: Pair<Long, List<String>>? = null
+        @Volatile var lastStructBar = 0L
         val ALL = listOf(
             StratInfo(RBF, "Gold 15m · Retest + Breaker + FVG", "XAUUSDT · 15m setup, 5m entry",
                 "Ahmed Tlogs '15m Gold Concept'. A 15m close through a swing low/high turns it into resistance/support (retest). " +
@@ -60,6 +81,11 @@ class StratBook(val store: Store) {
             StratInfo(COURSE, "Coins 4h · TA-course setups", "20 scanner coins · 4h",
                 "RSI divergence or range fade with S/R confluence from the TA course; stop from the setup, time exit after 30 four-hour bars.",
                 "Backtest 2024–26: about 0R per trade after costs (thin edge).", "TP1–TP5 hit before the stop (2024–26): 46% · 25% · 14% · 9% · 6%"),
+            StratInfo(STRUCT, "Market structure 15m · HH/HL · LH/LL", "All USDT perps (or top 20/50/100) · 15m",
+                "Swing highs/lows (k bars each side). Uptrend = HH + HL, downtrend = LH + LL. BOS: first close through the last swing in " +
+                    "the trend direction. CHOCH: first close through the last LH (in a downtrend → long) or HL (in an uptrend → short). " +
+                    "PULL: a new HL / LH confirmed in the trend. Stop at the opposite swing, time exit 24 h. Optional 4h EMA50/200 filter.",
+                Structure.BACKTEST, "BTC close-all at TP1 (1R), k=5: win 46–56%, −0.08 to −0.32R per trade after costs"),
         )
         fun info(id: String) = ALL.first { it.id == id }
     }
@@ -71,14 +97,68 @@ class StratBook(val store: Store) {
         o.put(id, (o.optJSONObject(id) ?: JSONObject()).put("auto", on))
         store.writeObj("strat_cfg.json", o)
     }
-    fun anyAuto() = auto(RBF) || auto(ASIA)
+    fun anyAuto() = auto(RBF) || auto(ASIA) || auto(STRUCT)
 
     fun signals(strat: String? = null): List<StratSig> = synchronized(LOCK) {
         (store.readArr("strat_log.json")?.let { a -> (0 until a.length()).mapNotNull { runCatching { StratSig.from(a.getJSONObject(it)) }.getOrNull() } }
             ?: emptyList()).filter { strat == null || it.strat == strat }
     }
+    /** Keeps the newest 600 signals per strategy (the structure scanner makes many; gold records must not be pushed out). */
     private fun saveSignals(l: List<StratSig>) = synchronized(LOCK) {
-        store.writeArr("strat_log.json", JSONArray(l.sortedBy { it.time }.takeLast(1000).map { it.toJson() }))
+        val keep = l.groupBy { it.strat }.values.flatMap { g -> g.sortedBy { it.time }.takeLast(600) }
+        store.writeArr("strat_log.json", JSONArray(keep.sortedBy { it.time }.map { it.toJson() }))
+    }
+
+    // ------------------------------------------------------------------ market structure 15m (many coins)
+    fun structCfg(): StructCfg = StructCfg.from(store.readObj("strat_cfg.json")?.optJSONObject("_struct"))
+    fun saveStructCfg(s: StructCfg) {
+        val o = store.readObj("strat_cfg.json") ?: JSONObject()
+        store.writeObj("strat_cfg.json", o.put("_struct", s.toJson()))
+    }
+    /** Last scan: time, coins, signals in the last 24 h, errors. */
+    fun structLast(): JSONObject? = store.readObj("strat_cfg.json")?.optJSONObject("_structLast")
+
+    private fun universe(pub: Binance, top: Int, now: Long): List<String> {
+        val u = universeCache?.takeIf { now - it.first < 3_600_000L }?.second
+            ?: pub.usdtPerps().sortedByDescending { it.volume }.map { it.symbol }.also { universeCache = now to it }
+        return if (top <= 0) u else u.take(top)
+    }
+
+    /**
+     * Scan every coin of the universe on closed 15m candles: entries of the last 24 h (open ones followed to now) go into the
+     * record. 6 parallel requests; 4h candles only for coins with a signal (cached until the next 4h close).
+     */
+    fun structScan(pub: Binance, now: Long = pub.nowMs()): List<StratSig> {
+        val cfg = structCfg()
+        val coins = universe(pub, cfg.top, now)
+        val since = now - 24 * 3_600_000L
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(6)
+        var errors = 0
+        val found = java.util.Collections.synchronizedList(ArrayList<Structure.Entry>())
+        try {
+            val jobs = coins.map { sym ->
+                pool.submit {
+                    try {
+                        val c = pub.candles(sym, "15m", 300)
+                        var e = Structure.entries(sym, c, now, cfg.k, cfg.setups, cfg.long, cfg.short, null, since)
+                        if (e.isNotEmpty() && cfg.filter4h) {
+                            val h4 = h4Cache[sym]?.takeIf { it.openTime.last() + Structure.H4 > now }
+                                ?: pub.candles(sym, "4h", 400).also { h4Cache[sym] = it }
+                            e = Structure.entries(sym, c, now, cfg.k, cfg.setups, cfg.long, cfg.short, h4, since)
+                        }
+                        found.addAll(e)
+                    } catch (x: Exception) { synchronized(found) { errors++ } }
+                }
+            }
+            jobs.forEach { runCatching { it.get(90, java.util.concurrent.TimeUnit.SECONDS) } }
+        } finally { pool.shutdownNow() }
+        val sigs = found.map { StratSig(STRUCT, it.id, it.symbol, it.sideName, it.time, it.entry, it.sl, it.tps, it.tpHit, it.result) }
+        record(sigs)
+        val o = store.readObj("strat_cfg.json") ?: JSONObject()
+        store.writeObj("strat_cfg.json", o.put("_structLast", JSONObject().put("time", now).put("coins", coins.size)
+            .put("signals", sigs.size).put("open", sigs.count { it.result == null }).put("errors", errors)))
+        lastStructBar = now / Structure.M15
+        return sigs
     }
 
     /** Live record: signals so far, share that reached each target before the stop. */
@@ -141,6 +221,10 @@ class StratBook(val store: Store) {
             val g = Gold.scan(pub, now); gold = g
             asiaSignal(g, g.price)?.let { s -> record(listOf(s)); if (s.result == null && now - s.time < 20 * 60_000L) fresh += ASIA to s }
         }.onFailure { store.log("WARN", "Strategy Asian range scan: ${it.message}") }
+        // market structure: once per 15m close (the loop wakes every 5 min)
+        if (now / Structure.M15 != lastStructBar) runCatching {
+            structScan(pub, now).filter { it.result == null && now - it.time < 20 * 60_000L }.forEach { fresh += STRUCT to it }
+        }.onFailure { store.log("WARN", "Market structure scan: ${it.message}") }
         val desk = ManualDesk(store)
         val done = signals().filter { it.traded }.map { it.id }.toSet()
         var api: Binance? = null
@@ -151,15 +235,27 @@ class StratBook(val store: Store) {
         val newOnes = fresh.filter { it.second.id !in alerted }
         if (newOnes.isNotEmpty()) {
             val ex = ExitCfg.load(store)
-            for ((id, s) in newOnes) if (!auto(id)) {
+            for ((id, s) in newOnes) if (!auto(id) && id != STRUCT) {
                 val t = Targets.ladder(s.side, s.entry, s.sl, ex.step)
                 ev += Event("strat", "${info(id).name}: ${s.side} ${s.symbol}",
                     "Entry ${f(s.entry)} · stop ${f(s.sl)} · T1 ${f(t[0])} … T5 ${f(t[4])}. Auto-trade is off: open the Strategy tab to trade.", true, s.symbol)
             }
-            saveAlerted((alerted + newOnes.map { it.second.id }).takeLast(200))
+            // structure: many coins, so one grouped alert per scan
+            val ms = newOnes.filter { it.first == STRUCT && !auto(STRUCT) }.map { it.second }
+            if (ms.isNotEmpty())
+                ev += Event("strat", "Market structure: ${ms.size} new signal${if (ms.size == 1) "" else "s"}",
+                    ms.take(6).joinToString("\n") { "${it.side} ${it.symbol} @ ${f(it.entry)} · stop ${f(it.sl)}" } +
+                        (if (ms.size > 6) "\n+${ms.size - 6} more" else "") + "\nAuto-trade is off: open the Strategy tab to trade.",
+                    true, ms.first().symbol)
+            saveAlerted((alerted + newOnes.map { it.second.id }).takeLast(1500))
         }
+        val structOpen = desk.active(c.mode).count { it.setup.startsWith("Strategy Market structure") }
+        var structNew = 0
+        val held = desk.active(c.mode).map { it.symbol }.toSet()
         for ((id, s) in fresh) {
             if (!auto(id) || s.id in done) continue
+            if (id == STRUCT && (s.symbol in held || structOpen + structNew >= c.maxOpen)) continue
+            if (id == STRUCT) structNew++
             markTraded(s.id)                          // one attempt per signal, even if Binance refuses it
             val name = info(id).name
             try {
@@ -179,6 +275,7 @@ class StratBook(val store: Store) {
             val due = when {
                 p.setup.contains("Retest") -> now - opened >= Rbf.HOLD5 * Rbf.M5
                 p.setup.contains("Asian") -> { val day = opened / 86_400_000L * 86_400_000L; now >= day + Gold.FLAT_H * 3_600_000L }
+                p.setup.contains("Market structure") -> now - opened >= Structure.HOLD * Structure.M15
                 else -> false
             }
             if (!due) continue

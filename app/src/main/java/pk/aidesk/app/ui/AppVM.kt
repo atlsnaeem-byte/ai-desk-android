@@ -313,6 +313,27 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     val rbf = MutableStateFlow<pk.aidesk.app.core.Rbf.View?>(null)
     val rbfErr = MutableStateFlow<String?>(null)
 
+    val structCfg = MutableStateFlow(pk.aidesk.app.core.StructCfg())
+    val structLast = MutableStateFlow<org.json.JSONObject?>(null)
+    val structBusy = MutableStateFlow(false)
+    fun saveStructCfg(s: pk.aidesk.app.core.StructCfg) = viewModelScope.launch {
+        withContext(Dispatchers.IO) { stratBook.saveStructCfg(s) }
+        structCfg.value = s
+    }
+    /** Scan all structure coins now (takes ~30-90 s for every USDT perp). */
+    fun scanStruct() {
+        if (structBusy.value) return
+        structBusy.value = true
+        viewModelScope.launch {
+            try {
+                val n = withContext(Dispatchers.IO) { stratBook.structScan(pub).size }
+                toast.value = "Market structure: $n signals in the last 24 h"
+            } catch (e: Exception) { toast.value = "Scan failed: ${e.message ?: e.javaClass.simpleName}" }
+            structBusy.value = false
+            loadStrats()
+        }
+    }
+
     val exitCfg = MutableStateFlow(pk.aidesk.app.core.ExitCfg())
     fun saveExitCfg(e: pk.aidesk.app.core.ExitCfg) = viewModelScope.launch {
         withContext(Dispatchers.IO) { pk.aidesk.app.core.ExitCfg.save(stratBook.store, e) }
@@ -321,6 +342,8 @@ class AppVM(app: Application) : AndroidViewModel(app) {
 
     fun loadStrats() = viewModelScope.launch {
         exitCfg.value = withContext(Dispatchers.IO) { pk.aidesk.app.core.ExitCfg.load(stratBook.store) }
+        structCfg.value = withContext(Dispatchers.IO) { stratBook.structCfg() }
+        structLast.value = withContext(Dispatchers.IO) { stratBook.structLast() }
         stratAuto.value = withContext(Dispatchers.IO) { pk.aidesk.app.core.StratBook.ALL.associate { it.id to stratBook.auto(it.id) } }
         stratSigs.value = withContext(Dispatchers.IO) { stratBook.signals().sortedByDescending { it.time } }
     }

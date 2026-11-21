@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -182,6 +183,58 @@ private fun TargetTrack(s: SigView, tps: List<Double>, r: Double, step: Double, 
             }
         }
     }
+}
+
+/** Market structure settings + scan status + Scan now. */
+@Composable
+fun StructPanel(vm: AppVM) {
+    val sc by vm.structCfg.collectAsState()
+    val last by vm.structLast.collectAsState()
+    val busy by vm.structBusy.collectAsState()
+    fun save(n: pk.aidesk.app.core.StructCfg) = vm.saveStructCfg(n)
+    Card {
+        T("Scanner settings", 14.sp, C.Txt, FontWeight.Bold)
+        Gap(6.dp)
+        T("Coins", 12.sp, C.Muted)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            for ((n, l) in listOf(0 to "All", 100 to "Top 100", 50 to "Top 50", 20 to "Top 20"))
+                Pill(l, if (sc.top == n) C.Green else C.Muted, filled = sc.top == n) { save(sc.copy(top = n)) }
+        }
+        Gap(6.dp)
+        T("Swing size k (bars each side)", 12.sp, C.Muted)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            for (k in listOf(3, 5, 10)) Pill("k = $k", if (sc.k == k) C.Green else C.Muted, filled = sc.k == k) { save(sc.copy(k = k)) }
+        }
+        Gap(6.dp)
+        T("Setups", 12.sp, C.Muted)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            for ((s, l) in listOf("BOS" to "BOS", "CHOCH" to "CHOCH", "PULL" to "Pullback")) {
+                val on = s in sc.setups
+                Pill(l, if (on) C.Green else C.Muted, filled = on) {
+                    val n = if (on) sc.setups - s else sc.setups + s
+                    if (n.isNotEmpty()) save(sc.copy(setups = n))
+                }
+            }
+        }
+        Gap(6.dp)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Pill("Buy", if (sc.long) C.Green else C.Muted, filled = sc.long) { if (sc.short || !sc.long) save(sc.copy(long = !sc.long)) }
+            Pill("Short sell", if (sc.short) C.Red else C.Muted, filled = sc.short) { if (sc.long || !sc.short) save(sc.copy(short = !sc.short)) }
+            Box(Modifier.weight(1f))
+            T("4h trend filter", 12.sp, C.Txt); HGap(6.dp)
+            Switch(sc.filter4h, { save(sc.copy(filter4h = it)) }, colors = SwitchDefaults.colors(checkedTrackColor = C.Green, checkedThumbColor = C.Txt))
+        }
+        Gap(8.dp)
+        val l = last
+        T(if (l == null) "Not scanned yet. The background scanner runs after every 15m close while the app's service is on."
+            else "Last scan ${dayHhmm(l.optLong("time"))}: ${l.optInt("coins")} coins · ${l.optInt("signals")} signals in 24 h · " +
+                "${l.optInt("open")} open" + (if (l.optInt("errors") > 0) " · ${l.optInt("errors")} coins failed" else ""), 11.sp, C.Muted)
+        Gap(6.dp)
+        Btn(if (busy) "Scanning…" else "Scan now", C.Blue, enabled = !busy, height = 40.dp) { vm.scanStruct() }
+        T("Defaults (k=10, BOS + CHOCH, 4h filter) are the least-bad BTC backtest settings. Settings apply from the next scan; " +
+            "auto-trade opens at most 'max open' (Settings) structure trades at a time, one per coin.", 10.sp, C.Dim)
+    }
+    Gap(10.dp)
 }
 
 /** Strategy-tab setting: how strategy / course trades exit. */
