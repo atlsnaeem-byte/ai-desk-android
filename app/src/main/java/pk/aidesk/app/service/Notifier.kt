@@ -118,6 +118,10 @@ object Notifier {
                 b.setContentIntent(openApp(ctx, id, "trade", sym))
                 b.addAction(0, "Open chart", openApp(ctx, id + 1, "trade", sym))
             }
+            "strat" -> {
+                b.setContentIntent(openApp(ctx, id, "strats", sym))
+                b.addAction(0, "View", openApp(ctx, id + 1, "strats", sym))
+            }
             "close" -> b.setContentIntent(openApp(ctx, id, "journal", sym))
             "botopen", "botclose" -> b.setContentIntent(openApp(ctx, id, "bots", sym))
             else -> b.setContentIntent(openApp(ctx, id, "signals"))

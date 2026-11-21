@@ -5,6 +5,23 @@ import org.json.JSONObject
 import java.util.Locale
 import kotlin.math.abs
 
+/** How strategy / course trades exit: 5-target ladder (1/5 at each) or the whole position at TP1; target spacing in R. */
+data class ExitCfg(val tp1Only: Boolean = false, val step: Double = 1.0) {
+    val label get() = (if (tp1Only) "Close all at TP1" else "5 targets, 1/5 at each") + " · TP1 = ${if (step == 0.5) "0.5" else "1"}R"
+
+    companion object {
+        fun load(store: Store): ExitCfg = store.readObj("strat_cfg.json")?.optJSONObject("_exit")?.let {
+            ExitCfg(it.optBoolean("tp1Only", false), if (it.optDouble("step", 1.0) == 0.5) 0.5 else 1.0)
+        } ?: ExitCfg()
+
+        fun save(store: Store, e: ExitCfg) {
+            val o = store.readObj("strat_cfg.json") ?: JSONObject()
+            o.put("_exit", JSONObject().put("tp1Only", e.tp1Only).put("step", e.step))
+            store.writeObj("strat_cfg.json", o)
+        }
+    }
+}
+
 /** One strategy in the Strategies tab (dropdown). */
 class StratInfo(val id: String, val name: String, val market: String, val rules: String, val backtest: String, val targets: String)
 
@@ -26,7 +43,7 @@ class StratSig(val strat: String, val id: String, val symbol: String, val side: 
  * Auto trades go through ManualDesk as MARKET orders with the strategy's stop and a 5-target ladder (1/5 closes at each
  * of 1R..5R); the Positions tab can close part / all, DCA or add margin at any time.
  */
-class StratBook(private val store: Store) {
+class StratBook(val store: Store) {
     companion object {
         const val RBF = "rbf_gold"; const val ASIA = "asia_gold"; const val COURSE = "course_4h"
         private val LOCK = Any()
@@ -82,6 +99,13 @@ class StratBook(private val store: Store) {
         saveSignals(l)
     }
 
+    private fun alertedIds(): List<String> = store.readObj("strat_cfg.json")?.optJSONArray("_alerted")
+        ?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()
+    private fun saveAlerted(ids: List<String>) {
+        val o = store.readObj("strat_cfg.json") ?: JSONObject()
+        store.writeObj("strat_cfg.json", o.put("_alerted", JSONArray(ids)))
+    }
+
     fun markTraded(id: String) = synchronized(LOCK) {
         val l = signals(); l.find { it.id == id }?.traded = true; saveSignals(l)
     }
@@ -121,6 +145,19 @@ class StratBook(private val store: Store) {
         val done = signals().filter { it.traded }.map { it.id }.toSet()
         var api: Binance? = null
         fun api() = api ?: trade().also { it.syncTime(); api = it }
+        // every new signal gets one alert, auto-trade on or off (before 22 Nov the scanner only ran with auto on, so
+        // 15m signals never showed up unless the Strategy tab was open)
+        val alerted = alertedIds()
+        val newOnes = fresh.filter { it.second.id !in alerted }
+        if (newOnes.isNotEmpty()) {
+            val ex = ExitCfg.load(store)
+            for ((id, s) in newOnes) if (!auto(id)) {
+                val t = Targets.ladder(s.side, s.entry, s.sl, ex.step)
+                ev += Event("strat", "${info(id).name}: ${s.side} ${s.symbol}",
+                    "Entry ${f(s.entry)} · stop ${f(s.sl)} · T1 ${f(t[0])} … T5 ${f(t[4])}. Auto-trade is off: open the Strategy tab to trade.", true, s.symbol)
+            }
+            saveAlerted((alerted + newOnes.map { it.second.id }).takeLast(200))
+        }
         for ((id, s) in fresh) {
             if (!auto(id) || s.id in done) continue
             markTraded(s.id)                          // one attempt per signal, even if Binance refuses it

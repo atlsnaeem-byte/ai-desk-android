@@ -59,6 +59,7 @@ private class PendingTrade(val title: String, val symbol: String, val side: Stri
 private fun TradeConfirm(vm: AppVM, act: MainActivity, title: String, symbol: String, side: String, sl: Double, setup: String, sigId: String?,
                          onDone: () -> Unit) {
     val cfg by vm.config.collectAsState()
+    val ex by vm.exitCfg.collectAsState()
     AlertDialog(onDismissRequest = onDone,
         confirmButton = {
             TextButton({
@@ -69,8 +70,9 @@ private fun TradeConfirm(vm: AppVM, act: MainActivity, title: String, symbol: St
         dismissButton = { TextButton(onDone) { Text("Cancel", color = C.Muted) } },
         title = { Text(title) },
         text = {
-            Text("Market $side $symbol now. Stop ${px(sl)}. Five targets at 1R…5R from your fill: 1/5 of the position closes at each, " +
-                "the stop stays for the rest. Risk ${pctTxt(cfg.riskPct)}% of equity, ${cfg.leverage}x. You can close part or all, DCA or add margin " +
+            val r1 = if (ex.step == 0.5) "0.5R" else "1R"
+            Text("Market $side $symbol now. Stop ${px(sl)}. " + (if (ex.tp1Only) "Whole position closes at TP1 ($r1 from your fill). "
+                else "Five targets at $r1 steps from your fill: 1/5 of the position closes at each, the stop stays for the rest. ") + "Risk ${pctTxt(cfg.riskPct)}% of equity, ${cfg.leverage}x. You can close part or all, DCA or add margin " +
                 "any time in Positions > Manage.")
         }, containerColor = C.Panel)
 }
@@ -86,8 +88,10 @@ fun StrategiesScreen(vm: AppVM, act: MainActivity) {
     val ta by vm.taSignals.collectAsState()
     val marks by vm.marks.collectAsState()
     var confirm by remember { mutableStateOf<PendingTrade?>(null) }
+    val ex by vm.exitCfg.collectAsState()
+    val now = rememberNow()
     LaunchedEffect(ticks) { vm.loadStrats(); vm.loadTa() }
-    LaunchedEffect(sel) { while (true) { if (sel == StratBook.RBF) vm.loadRbf() else if (sel == StratBook.ASIA) vm.loadGold(); delay(60_000) } }
+    LaunchedEffect(Unit) { while (true) { vm.loadRbf(); vm.loadGold(); delay(60_000) } }   // both: the Open signals list needs both
     LaunchedEffect(Unit) { while (true) { vm.refreshMarks(); delay(15_000) } }
     val info = StratBook.info(sel)
     val on = auto[sel] == true
@@ -122,21 +126,45 @@ fun StrategiesScreen(vm: AppVM, act: MainActivity) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             T("Auto-trade", 14.sp, C.Txt, FontWeight.Bold)
-                            T(if (on) "ON (${cfg.mode.uppercase()}): every new signal is traded, risk ${pctTxt(cfg.riskPct)}% · ${cfg.leverage}x, 5 targets"
+                            T(if (on) "ON (${cfg.mode.uppercase()}): every new signal is traded, risk ${pctTxt(cfg.riskPct)}% · ${cfg.leverage}x · ${ex.label}"
                                 else "OFF: signals and alerts only, trade by hand below", 11.sp, if (on) C.Green else C.Muted)
                         }
                         Switch(on, { v ->
                             if (v && cfg.mode == "live") act.confirmUser("Auto-trade ${info.name} LIVE") { vm.setStratAuto(sel, true) } else vm.setStratAuto(sel, v)
                         }, colors = SwitchDefaults.colors(checkedTrackColor = C.Green, checkedThumbColor = C.Txt))
                     }
-                    T("Targets: TP1–TP5 at 1R–5R; 1/5 closes at each, the stop stays for the rest. Close all / part, DCA and add margin: Positions > Manage.",
-                        10.sp, C.Dim)
+                    T("Exits: ${ex.label}. Close all / part, DCA and add margin: Positions > Manage.", 10.sp, C.Dim)
                     T(info.backtest, 10.sp, C.Amber)
                     T(info.targets, 10.sp, C.Dim)
                 }
                 Gap(10.dp)
-                SectionTitle("Now")
+                ExitSettingsCard(ex) { vm.saveExitCfg(it) }
+                Gap(10.dp)
             }
+            // every open signal, all strategies (Crypto Signals AI layout)
+            val openSigs = sigs.filter { it.result == null && now - it.time < 26 * 3_600_000L }
+            val openTa = ta.filter { it.active }
+            item { SectionTitle("Open signals (${openSigs.size + openTa.size})") }
+            if (openSigs.isEmpty() && openTa.isEmpty()) item {
+                T("No open signal. Gold 15m strategies are checked every 5 minutes in the background (alert on every new signal), " +
+                    "course setups at each 4h close.", 12.sp, C.Muted); Gap(8.dp)
+            }
+            items(openSigs, key = { "os" + it.id }) { s ->
+                val name = StratBook.info(s.strat).name
+                T(name, 11.sp, C.Muted)
+                SignalCard(SigView(s.symbol, s.side, s.entry, s.sl, s.time, s.tpHit, s.result, s.traded), marks[s.symbol], cfg.leverage, ex, now,
+                    onTrade = if (s.traded) null else ({ confirm = PendingTrade("Trade $name", s.symbol, s.side, s.sl, "Strategy $name", s.id) }),
+                    onChart = { vm.showChart(s.symbol) })
+                Gap(10.dp)
+            }
+            items(openTa, key = { "ot" + it.id }) { s ->
+                T("Course ${s.tf}: ${s.title}", 11.sp, C.Muted)
+                SignalCard(SigView(s.symbol, s.side, s.entry, s.sl, s.since, null, null), marks[s.symbol], cfg.leverage, ex, now,
+                    onTrade = { confirm = PendingTrade("Trade course setup", s.symbol, s.side, s.sl, "Course ${s.tf}: ${s.title}", null) },
+                    onChart = { vm.openTaSignal(s.symbol, s.tf) })
+                Gap(10.dp)
+            }
+            item { SectionTitle("Now · ${info.name}") }
             when (sel) {
                 StratBook.RBF -> item { RbfNow(vm) { e -> confirm = PendingTrade("Trade ${info.name}", "XAUUSDT", e.sideName, e.sl, "Strategy ${info.name}", e.id) } }
                 StratBook.ASIA -> item {

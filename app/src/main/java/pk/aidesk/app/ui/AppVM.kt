@@ -313,7 +313,14 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     val rbf = MutableStateFlow<pk.aidesk.app.core.Rbf.View?>(null)
     val rbfErr = MutableStateFlow<String?>(null)
 
+    val exitCfg = MutableStateFlow(pk.aidesk.app.core.ExitCfg())
+    fun saveExitCfg(e: pk.aidesk.app.core.ExitCfg) = viewModelScope.launch {
+        withContext(Dispatchers.IO) { pk.aidesk.app.core.ExitCfg.save(stratBook.store, e) }
+        exitCfg.value = e; toast.value = "Strategy exits: ${e.label}"
+    }
+
     fun loadStrats() = viewModelScope.launch {
+        exitCfg.value = withContext(Dispatchers.IO) { pk.aidesk.app.core.ExitCfg.load(stratBook.store) }
         stratAuto.value = withContext(Dispatchers.IO) { pk.aidesk.app.core.StratBook.ALL.associate { it.id to stratBook.auto(it.id) } }
         stratSigs.value = withContext(Dispatchers.IO) { stratBook.signals().sortedByDescending { it.time } }
     }
@@ -367,8 +374,11 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     val goldErr = MutableStateFlow<String?>(null)
     fun loadGold() = viewModelScope.launch {
         try {
-            gold.value = withContext(Dispatchers.IO) { pk.aidesk.app.core.Gold.scan(pub) }
-            goldErr.value = null
+            val g = withContext(Dispatchers.IO) { pk.aidesk.app.core.Gold.scan(pub) }
+            gold.value = g; goldErr.value = null
+            // record the Asian-range signal here too (the background scanner may not have run yet)
+            withContext(Dispatchers.IO) { stratBook.asiaSignal(g, g.price)?.let { stratBook.record(listOf(it)) } }
+            loadStrats()
         } catch (e: Exception) {
             goldErr.value = e.message ?: e.javaClass.simpleName
         }

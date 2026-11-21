@@ -21,6 +21,7 @@ class ManualPlan(
     var qtyLeft: Double = qty,                   // still open (after targets / partial closes); qty = everything bought (incl. DCA)
     var realized: Double = 0.0,                  // paper: P&L already booked by targets / partial closes (after their fees)
     var extraMargin: Double = 0.0,               // margin added by hand (isolated)
+    var tpStep: Double = 1.0,                    // ladder spacing in R (1.0 = 1R..5R, 0.5 = 0.5R..2.5R)
 ) {
     val dir: Int get() = if (side == "LONG") 1 else -1
     val active: Boolean get() = status == "pending" || status == "open"
@@ -38,7 +39,7 @@ class ManualPlan(
         fill?.let { put("fill", it) }; filledMs?.let { put("filledMs", it) }; exit?.let { put("exit", it) }
         exitMs?.let { put("exitMs", it) }; reason?.let { put("reason", it) }; pnl?.let { put("pnl", it) }
         if (tps.isNotEmpty()) put("tps", JSONArray(tps))
-        put("tpDone", tpDone); put("qtyLeft", qtyLeft); put("realized", realized); put("extraMargin", extraMargin)
+        put("tpDone", tpDone); put("qtyLeft", qtyLeft); put("realized", realized); put("extraMargin", extraMargin); put("tpStep", tpStep)
     }
 
     companion object {
@@ -50,10 +51,11 @@ class ManualPlan(
             o.optString("status", "pending"), o.d("fill"), o.l("filledMs"), o.d("exit"), o.l("exitMs"),
             if (o.has("reason")) o.getString("reason") else null, o.d("pnl"), o.optLong("lastCheck", o.getLong("created")), o.optString("note"),
             o.optJSONArray("tps")?.let { a -> (0 until a.length()).map { a.getDouble(it) } } ?: emptyList(),
-            o.optInt("tpDone", 0), o.optDouble("qtyLeft", o.getDouble("qty")), o.optDouble("realized", 0.0), o.optDouble("extraMargin", 0.0))
+            o.optInt("tpDone", 0), o.optDouble("qtyLeft", o.getDouble("qty")), o.optDouble("realized", 0.0), o.optDouble("extraMargin", 0.0),
+            o.optDouble("tpStep", 1.0))
 
-        /** TP1..TP5 at 1R..5R from the entry (R = entry-to-stop distance). */
-        fun ladder(side: String, entry: Double, sl: Double): List<Double> = Targets.ladder(side, entry, sl)
+        /** TP1..TP5 at step·1..5 R from the entry (R = entry-to-stop distance). */
+        fun ladder(side: String, entry: Double, sl: Double, step: Double = 1.0): List<Double> = Targets.ladder(side, entry, sl, step)
     }
 }
 
@@ -139,8 +141,12 @@ class ManualDesk(private val store: Store) {
 
     // ------------------------------------------------------------------ place
     fun place(c: Config, api: Binance, t0: Ticket): String = synchronized(LOCK) {
-        val t = if (!t0.ladder) t0 else
-            t0.copy(tp = ManualPlan.ladder(t0.side, if (t0.type == "MARKET") api.markPrice(t0.symbol) else t0.entry, t0.sl).last())
+        // ladder tickets (strategies, course trades) follow the Strategies-tab exit setting: 5 targets or all at TP1
+        val ex = if (t0.ladder) ExitCfg.load(store) else ExitCfg()
+        val t = if (!t0.ladder) t0 else {
+            val lad = ManualPlan.ladder(t0.side, if (t0.type == "MARKET") api.markPrice(t0.symbol) else t0.entry, t0.sl, ex.step)
+            if (ex.tp1Only) t0.copy(ladder = false, tp = lad.first()) else t0.copy(tp = lad.last())
+        }
         val q = quote(c, api, t)
         q.block?.let { throw UserError(it) }
         val s = if (t.side == "LONG") 1 else -1
@@ -154,7 +160,7 @@ class ManualDesk(private val store: Store) {
                 p.status = "open"; p.fill = q.price * (1 + s * SLIP / 100); p.filledMs = now
                 store.state(c.mode, c.paperStartEquity).let { st -> st.equity -= p.qty * p.fill!! * FEE; store.saveState(c.mode, st) }
             }
-            if (t.ladder) setLadder(p)
+            if (t.ladder) { p.tpStep = ex.step; setLadder(p) }
             if (p.status == "open") journal(p)
             save(c.mode, plans(c.mode) + p)
             store.log("INFO", "PAPER manual ${t.type} ${t.side} ${t.symbol} qty ${f(q.qty)} @ ${f(p.entry)} SL ${f(t.sl)} TP ${f(t.tp)}")
@@ -188,7 +194,7 @@ class ManualDesk(private val store: Store) {
             store.log("ERROR", "Manual ${t.type} ${t.symbol} rejected: ${e.msg}")
             throw UserError("Binance rejected the order: ${e.msg}")
         }
-        if (t.ladder) setLadder(p)
+        if (t.ladder) { p.tpStep = ex.step; setLadder(p) }
         save(c.mode, plans(c.mode) + p)
         val prot = protect(api, p)                        // SL/TP now where Binance accepts them; the watcher adds the rest
         if (p.status == "open") {
@@ -205,7 +211,7 @@ class ManualDesk(private val store: Store) {
     }
 
     private fun setLadder(p: ManualPlan) {
-        p.tps = ManualPlan.ladder(p.side, p.fill ?: p.entry, p.sl)
+        p.tps = ManualPlan.ladder(p.side, p.fill ?: p.entry, p.sl, p.tpStep)
         p.tp = p.tps.last()
     }
 

@@ -10,12 +10,15 @@ import kotlin.math.min
  * variant: breaker required, no fib, no trend filter, stop above/below the 3 FVG candles + 0.1 ATR).
  * Backtest after costs: -0.61R (2024-25 PAXG), -0.57R (Dec 25-Jun 26), -0.64R (Jul-Nov 26 holdout) per trade at 1:3.
  */
-/** TP1..TP5 at 1R..5R from the entry (R = entry-to-stop distance): every signal and strategy trade uses these. */
+/**
+ * TP1..TP5 at step·1 .. step·5 R from the entry (R = entry-to-stop distance). step 1.0 = 1R..5R (records, backtests);
+ * step 0.5 = 0.5R..2.5R, the Crypto Signals AI layout (stop two target-steps behind the entry).
+ */
 object Targets {
-    fun ladder(side: String, entry: Double, sl: Double): List<Double> {
+    fun ladder(side: String, entry: Double, sl: Double, step: Double = 1.0): List<Double> {
         val d = if (side == "LONG") 1 else -1
         val r = abs(entry - sl)
-        return (1..5).map { entry + d * it * r }
+        return (1..5).map { entry + d * it * step * r }
     }
 }
 

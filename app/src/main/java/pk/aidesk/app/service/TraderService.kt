@@ -290,7 +290,10 @@ class TraderService : Service() {
     private var stratJob: Job? = null
     private var stratWl: PowerManager.WakeLock? = null
 
-    /** Every 5-minute close + 6 s while a strategy's auto-trade is on: new signals -> trade with a 5-target ladder; time exits. */
+    /**
+     * Every 5-minute close + 6 s while the service runs: the 15m strategies are scanned and recorded and every new signal
+     * gets an alert; strategies with auto-trade on are also traded (exit per the Strategy tab setting); time exits.
+     */
     fun ensureStratLoop() {
         if (stratJob?.isActive == true) return
         stratJob = scope.launch {
@@ -298,7 +301,6 @@ class TraderService : Service() {
             val api = Binance()
             var synced = 0L
             while (isActive) {
-                if (!book.anyAuto()) break
                 val wl = stratWl ?: (getSystemService(POWER_SERVICE) as PowerManager)
                     .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aidesk:strats").apply { setReferenceCounted(false) }.also { stratWl = it }
                 wl.acquire(3 * 60_000L)
