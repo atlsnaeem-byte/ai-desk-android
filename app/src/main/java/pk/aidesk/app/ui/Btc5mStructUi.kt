@@ -327,18 +327,11 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
             (if (cfg.early) "re-checked every 1.5 s until the round starts." else "re-checked every 8 s until the window closes."), 10.sp, C.Dim)
         Gap(8.dp)
         // ---- hard limits
-        T("Hard limits", 12.sp, C.Txt, FontWeight.Bold)
+        T("Optional limits (off = same as the backtest)", 12.sp, C.Txt, FontWeight.Bold)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Pill("Daily loss ${if (cfg.dailyLossUsdt > 0) f2(cfg.dailyLossUsdt) + " USDT" else "off"}", C.Amber) { edit = "loss" to f2(cfg.dailyLossUsdt) }
             Pill("Max ${if (cfg.maxTradesDay > 0) cfg.maxTradesDay.toString() else "∞"}/day", C.Amber) { edit = "trades" to cfg.maxTradesDay.toString() }
             Pill("Pause after ${if (cfg.lossStreak > 0) cfg.lossStreak.toString() else "-"} losses", C.Amber) { edit = "streak" to cfg.lossStreak.toString() }
-        }
-        Gap(4.dp)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            T(if (cfg.killSwitch) "KILL SWITCH ON · no new bets" else "Kill switch off", 12.sp, if (cfg.killSwitch) C.Red else C.Muted, FontWeight.Bold,
-                modifier = Modifier.weight(1f))
-            Switch(cfg.killSwitch, { vm.saveStructCfg(cfg.copy(killSwitch = it)) },
-                colors = SwitchDefaults.colors(checkedTrackColor = C.Red, checkedThumbColor = C.Txt))
         }
         Gap(8.dp)
         // ---- Prediction API key

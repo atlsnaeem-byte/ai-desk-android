@@ -31,14 +31,14 @@ class Btc5mStructBook(private val store: Store) {
         val useQuotes: Boolean = true,     // PAPER uses real Binance quotes when an API key is saved
         val armed: Boolean = false,        // LIVE orders allowed
         val killSwitch: Boolean = false,
-        val dailyLossUsdt: Double = 5.0,   // 0 = off
-        val maxTradesDay: Int = 300,       // 0 = off
-        val lossStreak: Int = 4,           // pause after N losses in a row, 0 = off
+        val dailyLossUsdt: Double = 0.0,   // 0 = off
+        val maxTradesDay: Int = 0,         // 0 = off
+        val lossStreak: Int = 0,           // pause after N losses in a row, 0 = off
         val pauseMin: Int = 60,
-        val early: Boolean = false,        // call 10 s BEFORE the round starts (from the still-forming candles)
+        val early: Boolean = true,         // call 10 s BEFORE the round starts (from the still-forming candles)
     ) {
         val thr get() = thrPct / 100
-        fun json() = JSONObject().put("v", 2).put("auto", auto).put("mode", mode).put("stake", stake).put("thrPct", thrPct)
+        fun json() = JSONObject().put("v", 3).put("auto", auto).put("mode", mode).put("stake", stake).put("thrPct", thrPct)
             .put("paperCents", paperCents).put("alerts", alerts).put("minP", minP).put("minEdgePct", minEdgePct)
             .put("windowSec", windowSec).put("useQuotes", useQuotes).put("armed", armed).put("killSwitch", killSwitch)
             .put("dailyLossUsdt", dailyLossUsdt).put("maxTradesDay", maxTradesDay).put("lossStreak", lossStreak).put("pauseMin", pauseMin).put("early", early)
@@ -52,7 +52,10 @@ class Btc5mStructBook(private val store: Store) {
                     o.optBoolean("armed", d.armed), o.optBoolean("killSwitch", d.killSwitch), o.optDouble("dailyLossUsdt", d.dailyLossUsdt),
                     o.optInt("maxTradesDay", d.maxTradesDay), o.optInt("lossStreak", d.lossStreak), o.optInt("pauseMin", d.pauseMin), o.optBoolean("early", d.early))
                 // v2 (2026-11-22): one rule only, P(UP) >= 52% -> UP, <= 48% -> DOWN, every call bet; edge gate off
-                return if (o.optInt("v", 1) < 2) c.copy(thrPct = 52.0, minP = 0.0, minEdgePct = -100.0, maxTradesDay = 300) else c
+                // v3 (2026-11-22): exactly the 1-second backtest that made +$322 in 60 days: 52% rule, call + buy 10 s before the
+                // round start, every call bet ($1, no price check), no daily / streak / trade-count limits, no kill switch
+                return if (o.optInt("v", 1) < 3) c.copy(thrPct = 52.0, minP = 0.0, minEdgePct = -100.0, early = true, stake = if (c.mode == "live") maxOf(c.stake, 1.5) else 1.0,
+                    paperCents = 50.0, dailyLossUsdt = 0.0, maxTradesDay = 0, lossStreak = 0, killSwitch = false) else c.copy(killSwitch = false)
             }
         }
     }
@@ -181,7 +184,6 @@ class Btc5mStructBook(private val store: Store) {
 
     /** null = allowed, else the reason it is blocked. */
     fun riskBlock(cfg: Cfg, mode: String, now: Long): String? {
-        if (cfg.killSwitch) return "kill switch on"
         val b = bets().filter { it.mode == mode }
         val today = b.filter { it.T >= dayStart(now) }
         if (cfg.maxTradesDay > 0 && today.size >= cfg.maxTradesDay) return "max ${cfg.maxTradesDay} trades today reached"
