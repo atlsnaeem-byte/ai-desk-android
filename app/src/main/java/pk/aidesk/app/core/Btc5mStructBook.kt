@@ -214,7 +214,9 @@ class Btc5mStructBook(private val store: Store) {
         }
         if (c.side == "NONE") return Step(true, "no call this round")
         if (hasBet(T, mode) || (mode == "live" && marked(T))) return Step(true, "round already traded")
-        if ((now - T) / 1000 > cfg.windowSec) return skip("entry window (${cfg.windowSec}s) passed")
+        // early mode: buy only BEFORE the round starts (the call was made from the candles at T-10 s); no entry window
+        if (cfg.early && now >= T) return skip("round started before an early buy was possible: skipped")
+        if (!cfg.early && (now - T) / 1000 > cfg.windowSec) return skip("entry window (${cfg.windowSec}s) passed")
         if (mode == "live" && !cfg.armed) return skip("LIVE not armed")
         if (mode == "live" && api == null) return skip("LIVE needs a Prediction API key")
         if (mode == "live" && cfg.stake < 1.5) return skip("LIVE stake must be at least 1.5 USDT")
@@ -236,7 +238,7 @@ class Btc5mStructBook(private val store: Store) {
                 plan = api.funding(bal, runCatching { api.walletBalance(wallet) }.getOrNull(), cfg.stake)
                 if (plan == null && mode == "live") return skip("not enough Prediction balance for ${cfg.stake} USDT")
                 market = try { api.market(T) } catch (e: UserError) {
-                    if (cfg.early) return Step(false, "round market not open yet (${(now - T) / 1000}s)") else throw e
+                    if (cfg.early) return Step(false, "next round market not listed yet (${(now - T) / 1000}s)") else throw e
                 }
                 if (cfg.early) noteMarket(T, now, market.let { if (c.side == "UP") it.up.price else it.down.price })
                 val tok = if (c.side == "UP") market.up else market.down

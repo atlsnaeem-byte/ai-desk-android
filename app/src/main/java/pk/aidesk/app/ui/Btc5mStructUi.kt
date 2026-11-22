@@ -313,7 +313,9 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
             for (e in listOf(0.0, 2.0, 5.0)) Pill("${e.toInt()}%", C.Blue, filled = cfg.minEdgePct == e) { vm.saveStructCfg(cfg.copy(minEdgePct = e, minP = 0.0)) }
         }
         Gap(4.dp)
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (cfg.early) T("Buys at 10 s before the round starts (e.g. 12:54:50 for the 12:55 round). If the buy can't be made " +
+            "before the start, that round is skipped: no buying after the start.", 11.sp, C.Muted)
+        else Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Entry window", 11.sp, C.Muted)
             for (s in listOf(20, 30, 45, 60, 90)) Pill(String.format(US, "%d:%02d", s / 60, s % 60), C.Blue, filled = cfg.windowSec == s) {
                 vm.saveStructCfg(cfg.copy(windowSec = s))
@@ -322,7 +324,7 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         T(if (cfg.minEdgePct <= -100.0) "Off: every call with P(UP) ≥ 52% or ≤ 48% is bet at the Binance quote, whatever the price. " +
             "With the 2% fee this rule loses money if shares cost more than about 51¢."
           else "On: a call is bet only if backtest win rate × shares − cost ≥ ${cfg.minEdgePct.toInt()}% of cost at the real quote (2% fee included); " +
-            "re-checked every 8 s until the window closes.", 10.sp, C.Dim)
+            (if (cfg.early) "re-checked every 1.5 s until the round starts." else "re-checked every 8 s until the window closes."), 10.sp, C.Dim)
         Gap(8.dp)
         // ---- hard limits
         T("Hard limits", 12.sp, C.Txt, FontWeight.Bold)

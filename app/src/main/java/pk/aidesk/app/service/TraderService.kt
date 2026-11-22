@@ -321,9 +321,10 @@ class TraderService : Service() {
                     if (isNew && call != null) {
                         // same decision path for PAPER and LIVE: quote -> EV gate -> risk -> execute; re-quote every 8 s in the window
                         var step = book.tryEnter(call, cfg, pred, api.nowMs())
-                        while (!step.done && api.nowMs() - call.roundStart < cfg.windowSec * 1000L) {
+                        // early: retry only until the round starts; at round start: until the entry window closes
+                        while (!step.done && (if (cfg.early) api.nowMs() < call.roundStart else api.nowMs() - call.roundStart < cfg.windowSec * 1000L)) {
                             book.setStatus(step.text); structTicks.value = System.currentTimeMillis()
-                            delay(if (api.nowMs() < call.roundStart + 5_000L) 2_000L else 8_000L)
+                            delay(if (cfg.early) 1_500L else 8_000L)
                             step = book.tryEnter(call, book.cfg(), pred, api.nowMs())
                         }
                         book.setStatus("${hhmmUtc(call.roundStart)} ${call.side} · ${step.text}")
