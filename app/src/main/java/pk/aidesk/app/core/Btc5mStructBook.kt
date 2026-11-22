@@ -22,22 +22,22 @@ class Btc5mStructBook(private val store: Store) {
         val auto: Boolean = true,          // background loop: call + auto bet every round
         val mode: String = "paper",        // paper | live
         val stake: Double = 1.0,           // USDT per bet (LIVE minimum 1.5)
-        val thrPct: Double = 56.0,         // call when P(UP) >= thr or <= 100 - thr
+        val thrPct: Double = 52.0,         // call when P(UP) >= 52% -> UP, <= 48% -> DOWN
         val paperCents: Double = 50.0,     // paper fill price when no Binance quote is available
         val alerts: Boolean = true,
-        val minP: Double = 0.52,           // min backtest win rate of the called side
-        val minEdgePct: Double = 2.0,      // min EV / cost after the fee
+        val minP: Double = 0.0,            // min backtest win rate of the called side (0 = off)
+        val minEdgePct: Double = -100.0,   // min EV / cost after the fee (-100 = off)
         val windowSec: Int = 45,           // enter only in the first N seconds of the round
         val useQuotes: Boolean = true,     // PAPER uses real Binance quotes when an API key is saved
         val armed: Boolean = false,        // LIVE orders allowed
         val killSwitch: Boolean = false,
         val dailyLossUsdt: Double = 5.0,   // 0 = off
-        val maxTradesDay: Int = 100,       // 0 = off
+        val maxTradesDay: Int = 300,       // 0 = off
         val lossStreak: Int = 4,           // pause after N losses in a row, 0 = off
         val pauseMin: Int = 60,
     ) {
         val thr get() = thrPct / 100
-        fun json() = JSONObject().put("auto", auto).put("mode", mode).put("stake", stake).put("thrPct", thrPct)
+        fun json() = JSONObject().put("v", 2).put("auto", auto).put("mode", mode).put("stake", stake).put("thrPct", thrPct)
             .put("paperCents", paperCents).put("alerts", alerts).put("minP", minP).put("minEdgePct", minEdgePct)
             .put("windowSec", windowSec).put("useQuotes", useQuotes).put("armed", armed).put("killSwitch", killSwitch)
             .put("dailyLossUsdt", dailyLossUsdt).put("maxTradesDay", maxTradesDay).put("lossStreak", lossStreak).put("pauseMin", pauseMin)
@@ -45,11 +45,13 @@ class Btc5mStructBook(private val store: Store) {
             fun of(o: JSONObject?): Cfg {
                 if (o == null) return Cfg()
                 val d = Cfg()
-                return Cfg(o.optBoolean("auto", d.auto), o.optString("mode", d.mode), o.optDouble("stake", d.stake), o.optDouble("thrPct", d.thrPct),
+                val c = Cfg(o.optBoolean("auto", d.auto), o.optString("mode", d.mode), o.optDouble("stake", d.stake), o.optDouble("thrPct", d.thrPct),
                     o.optDouble("paperCents", d.paperCents), o.optBoolean("alerts", d.alerts), o.optDouble("minP", d.minP),
                     o.optDouble("minEdgePct", d.minEdgePct), o.optInt("windowSec", d.windowSec), o.optBoolean("useQuotes", d.useQuotes),
                     o.optBoolean("armed", d.armed), o.optBoolean("killSwitch", d.killSwitch), o.optDouble("dailyLossUsdt", d.dailyLossUsdt),
                     o.optInt("maxTradesDay", d.maxTradesDay), o.optInt("lossStreak", d.lossStreak), o.optInt("pauseMin", d.pauseMin))
+                // v2 (2026-11-22): one rule only, P(UP) >= 52% -> UP, <= 48% -> DOWN, every call bet; edge gate off
+                return if (o.optInt("v", 1) < 2) c.copy(thrPct = 52.0, minP = 0.0, minEdgePct = -100.0, maxTradesDay = 300) else c
             }
         }
     }

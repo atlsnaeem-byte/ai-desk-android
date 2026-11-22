@@ -487,6 +487,22 @@ class AppVM(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+    /** Live BTC spot price for the moving forming candle (1 s while the Prediction tab is open). */
+    val structPx = MutableStateFlow<Double?>(null)
+    private var pxBusy = false
+    fun loadStructPx() {
+        if (pxBusy) return
+        pxBusy = true
+        viewModelScope.launch {
+            try {
+                structPx.value = withContext(Dispatchers.IO) {
+                    (pub.request("GET", "/api/v3/ticker/price", mapOf("symbol" to "BTCUSDT"), host = pk.aidesk.app.core.Binance.SPOT) as org.json.JSONObject)
+                        .getString("price").toDouble()
+                }
+            } catch (_: Exception) {
+            } finally { pxBusy = false }
+        }
+    }
     val structBook by lazy { pk.aidesk.app.core.Btc5mStructBook(store) }
     class StructView(val cfg: pk.aidesk.app.core.Btc5mStructBook.Cfg, val bets: List<pk.aidesk.app.core.Btc5mStructBook.Bet>,
                      val rounds: List<pk.aidesk.app.core.Btc5mStructBook.RoundRow>,

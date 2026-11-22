@@ -62,6 +62,8 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
     val err by vm.structErr.collectAsState()
     val bv by vm.structView.collectAsState()
     LaunchedEffect(Unit) { while (true) { vm.loadStruct(); delay(3_000) } }
+    LaunchedEffect(Unit) { while (true) { vm.loadStructPx(); delay(1_000) } }
+    val livePx by vm.structPx.collectAsState()
     val c = call
     val cfg = bv?.cfg ?: Btc5mStructBook.Cfg()
     Card(border = if (c != null && c.side != "NONE") sideCol(c.side) else C.Border) {
@@ -79,12 +81,12 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
             T(mmss(left), 15.sp, if (left < 60_000) C.Amber else C.Txt, FontWeight.SemiBold, mono = true)
         }
         Gap(4.dp)
-        T("P(UP) ${String.format(US, "%.1f", c.pUp * 100)}% · needs ≥ ${cfg.thrPct.toInt()}% for UP or ≤ ${(100 - cfg.thrPct).toInt()}% for DOWN",
+        T("P(UP) ${String.format(US, "%.1f", c.pUp * 100)}% · ≥ 52% → UP, ≤ 48% → DOWN",
             12.sp, C.Muted)
         T("Price to beat ${px(c.open)} → now ${px(c.price)} (${String.format(US, "%+.1f", c.moveBps)} bps)",
             12.sp, if (c.price >= c.open) C.Green else C.Red)
         Gap(6.dp)
-        StructChart(c)
+        StructChart(c, livePx)
         Gap(6.dp)
         // structure on each timeframe
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -105,7 +107,7 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
             Gap(6.dp)
             val already = bv?.bets?.any { it.T == c.roundStart && it.mode == cfg.mode } == true
             val maxPx = c.winP / (1.02 * (1 + cfg.minEdgePct / 100))
-            T("Backtest win rate at this confidence ${String.format(US, "%.1f", c.winP * 100)}% · buys only if the ${c.side} share costs " +
+            if (cfg.minEdgePct > -100.0) T("Backtest win rate at this confidence ${String.format(US, "%.1f", c.winP * 100)}% · buys only if the ${c.side} share costs " +
                 "≤ ${String.format(US, "%.1f", maxPx * 100)}¢ (2% fee, edge ≥ ${cfg.minEdgePct}%)" +
                 (if (c.winP < cfg.minP) " · below min win rate ${String.format(US, "%.1f", cfg.minP * 100)}%: skipped" else ""), 11.sp, C.Muted)
             bv?.rounds?.firstOrNull { it.T == c.roundStart }?.note?.takeIf { it.isNotBlank() }?.let {
@@ -141,11 +143,25 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
 }
 
 @Composable
-private fun StructChart(c: Btc5mStruct.Call) {
-    Canvas(Modifier.fillMaxWidth().height(250.dp).clip(RoundedCornerShape(10.dp)).background(C.Bg)) { drawStruct(c) }
+private fun StructChart(c: Btc5mStruct.Call, livePx: Double?) {
+    // the forming candle follows the 1 s live price; the high/low only widen
+    var hi by remember(c.roundStart) { mutableStateOf(c.forming5?.get(1) ?: Double.NaN) }
+    var lo by remember(c.roundStart) { mutableStateOf(c.forming5?.get(2) ?: Double.NaN) }
+    val px = livePx ?: c.price
+    c.forming5?.let { f ->
+        hi = maxOf(if (hi.isNaN()) f[1] else hi, f[1], px)
+        lo = minOf(if (lo.isNaN()) f[2] else lo, f[2], px)
+    }
+    val form = c.forming5?.let { doubleArrayOf(it[0], hi, lo, px) }
+    Canvas(Modifier.fillMaxWidth().height(260.dp).clip(RoundedCornerShape(10.dp)).background(C.Bg)) { drawStruct(c, form, px) }
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        T("━ beat ${px(c.open)}", 10.sp, C.Amber)
+        T("▮ live 5m candle", 10.sp, C.Muted)
+        T("▮ AI projected 5m: ${if (c.projClose >= c.open) "UP" else "DOWN"} ${px(c.projClose)}", 10.sp, if (c.projClose >= c.open) C.Green else C.Red)
+    }
 }
 
-private fun DrawScope.drawStruct(c: Btc5mStruct.Call) {
+private fun DrawScope.drawStruct(c: Btc5mStruct.Call, form: DoubleArray?, livePx: Double) {
     val b = c.bars5
     val n = b.size
     if (n < 5) return
@@ -156,7 +172,7 @@ private fun DrawScope.drawStruct(c: Btc5mStruct.Call) {
     val W = size.width - axisW; val H = size.height - padT - padB
     val step = W / slots
     fun x(i: Int) = ((i - start) + 0.5f) * step
-    val f = c.forming5
+    val f = form
     var lo = Double.MAX_VALUE; var hi = -Double.MAX_VALUE
     for (i in start until n) { lo = min(lo, b.l[i]); hi = max(hi, b.h[i]) }
     f?.let { lo = min(lo, it[2]); hi = max(hi, it[1]) }
@@ -183,7 +199,7 @@ private fun DrawScope.drawStruct(c: Btc5mStruct.Call) {
         drawRect(col, Offset(xc - bw / 2, top), Size(bw, max(1.5f, bot - top)))
     }
     for (i in start until n) candle(x(i), b.o[i], b.h[i], b.l[i], b.c[i], 1f)
-    if (f != null) candle(x(n), f[0], f[1], f[2], f[3], 0.75f)
+    if (f != null) candle(x(n), f[0], f[1], f[2], f[3], 1f)
     // swings with HH / HL / LH / LL labels (5m)
     for (s in c.tf.getValue("m5").swings) {
         if (s.i < start) continue
@@ -196,17 +212,25 @@ private fun DrawScope.drawStruct(c: Btc5mStruct.Call) {
     val dash = PathEffect.dashPathEffect(floatArrayOf(10f, 8f))
     drawLine(C.Amber, Offset(0f, y(c.open)), Offset(W, y(c.open)), 1.2.dp.toPx(), pathEffect = dash)
     text("beat ${px(c.open)}", 4.dp.toPx(), y(c.open) - 3.dp.toPx(), C.Amber, bold = true)
-    drawLine(C.Txt.copy(alpha = 0.35f), Offset(0f, y(c.price)), Offset(W, y(c.price)), 1f)
-    // AI projected candle (dashed) in the next slot
+    // live price line + tag on the axis (moves every second)
+    val yl = y(livePx)
+    drawLine(C.Txt.copy(alpha = 0.45f), Offset(0f, yl), Offset(W, yl), 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 6f)))
+    val lcol = if (livePx >= c.open) C.Green else C.Red
+    drawRect(lcol, Offset(W + 1.dp.toPx(), yl - 7.dp.toPx()), Size(axisW - 2.dp.toPx(), 14.dp.toPx()))
+    text(px(livePx), W + 4.dp.toPx(), yl + 3.dp.toPx(), C.Bg, bold = true)
+    // AI projected 5m candle: solid, coloured by its projected direction (green up / red down), min body so the colour shows
     val xp = x(n + 1)
-    val pcol = when (c.side) { "UP" -> C.Green; "DOWN" -> C.Red; else -> C.Blue }
-    drawLine(pcol.copy(alpha = 0.8f), Offset(xp, y(c.projHigh)), Offset(xp, y(c.projLow)), 1.3f, pathEffect = dash)
-    val top = y(max(c.open, c.projClose)); val bot = y(min(c.open, c.projClose))
-    drawRect(pcol.copy(alpha = 0.25f), Offset(xp - bw / 2, top), Size(bw, max(2f, bot - top)))
-    drawRect(pcol, Offset(xp - bw / 2, top), Size(bw, max(2f, bot - top)), style = Stroke(1.2f, pathEffect = dash))
-    text("AI", xp, padT - 3.dp.toPx(), pcol, bold = true, center = true)
+    val pcol = if (c.projClose >= c.open) C.Green else C.Red
+    val pw = bw * 1.15f
+    drawRect(pcol.copy(alpha = 0.12f), Offset(xp - step / 2, padT), Size(step, H))
+    drawLine(pcol, Offset(xp, y(c.projHigh)), Offset(xp, y(c.projLow)), 2f)
+    var top = y(max(c.open, c.projClose)); var bot = y(min(c.open, c.projClose))
+    val minH = 8.dp.toPx()
+    if (bot - top < minH) { val mid = (top + bot) / 2; top = mid - minH / 2; bot = mid + minH / 2 }
+    drawRect(pcol.copy(alpha = 0.85f), Offset(xp - pw / 2, top), Size(pw, bot - top))
+    drawRect(C.Txt, Offset(xp - pw / 2, top), Size(pw, bot - top), style = Stroke(1.2f, pathEffect = dash))
+    text(if (c.projClose >= c.open) "AI ▲" else "AI ▼", xp, padT - 3.dp.toPx(), pcol, bold = true, center = true)
 }
-
 /** Settings + paper / live record for the structure AI. */
 @Composable
 fun StructRecordCard(vm: AppVM, act: MainActivity) {
@@ -266,15 +290,11 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         }
         Gap(8.dp)
         // ---- edge gate (PredictAI V7.3.0)
-        T("Edge check (same for PAPER and LIVE)", 12.sp, C.Txt, FontWeight.Bold)
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            T("Min win rate", 11.sp, C.Muted)
-            for (p in listOf(0.515, 0.52, 0.525, 0.53, 0.535)) Pill(String.format(US, "%.1f%%", p * 100), C.Blue, filled = kotlin.math.abs(cfg.minP - p) < 1e-6) { vm.saveStructCfg(cfg.copy(minP = p)) }
-        }
-        Gap(4.dp)
+        T("Price check (optional, same for PAPER and LIVE)", 12.sp, C.Txt, FontWeight.Bold)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Min edge", 11.sp, C.Muted)
-            for (e in listOf(0.0, 1.0, 2.0, 3.0, 5.0)) Pill("${e.toInt()}%", C.Blue, filled = cfg.minEdgePct == e) { vm.saveStructCfg(cfg.copy(minEdgePct = e)) }
+            Pill("Off · bet every call", C.Blue, filled = cfg.minEdgePct <= -100.0) { vm.saveStructCfg(cfg.copy(minEdgePct = -100.0, minP = 0.0)) }
+            for (e in listOf(0.0, 2.0, 5.0)) Pill("${e.toInt()}%", C.Blue, filled = cfg.minEdgePct == e) { vm.saveStructCfg(cfg.copy(minEdgePct = e, minP = 0.0)) }
         }
         Gap(4.dp)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -283,8 +303,10 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
                 vm.saveStructCfg(cfg.copy(windowSec = s))
             }
         }
-        T("A bet goes in only if: win rate ≥ min, and win rate × shares − cost ≥ min edge × cost, using the real Binance quote " +
-            "(cost includes the 2% fee). The quote is re-checked every 8 s until the window closes.", 10.sp, C.Dim)
+        T(if (cfg.minEdgePct <= -100.0) "Off: every call with P(UP) ≥ 52% or ≤ 48% is bet at the Binance quote, whatever the price. " +
+            "With the 2% fee this rule loses money if shares cost more than about 51¢."
+          else "On: a call is bet only if backtest win rate × shares − cost ≥ ${cfg.minEdgePct.toInt()}% of cost at the real quote (2% fee included); " +
+            "re-checked every 8 s until the window closes.", 10.sp, C.Dim)
         Gap(8.dp)
         // ---- hard limits
         T("Hard limits", 12.sp, C.Txt, FontWeight.Bold)
@@ -304,11 +326,8 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         // ---- Prediction API key
         PredKeyBox(vm, bv.keyHint)
         Gap(8.dp)
-        T("Call threshold (backtest ${m?.testStart ?: ""} → ${m?.testEnd ?: ""}, ${m?.days ?: 180} days, $1 per call)", 12.sp, C.Txt, FontWeight.Bold)
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            for (p in listOf(52.0, 54.0, 56.0, 58.0, 60.0)) Pill("${p.toInt()}%", C.Blue, filled = cfg.thrPct == p) { vm.saveStructCfg(cfg.copy(thrPct = p)) }
-        }
-        m?.bt(cfg.thr)?.let { b ->
+        T("Rule P(UP) ≥ 52% → UP, ≤ 48% → DOWN · backtest ${m?.testStart ?: ""} → ${m?.testEnd ?: ""} (${m?.days ?: 180} days, $1 per call, no fee)", 12.sp, C.Txt, FontWeight.Bold)
+        m?.bt(0.52)?.let { b ->
             T("≈ ${b.perDay.toInt()} calls/day · won ${String.format(US, "%.1f", b.win * 100)}% · $1 each: " +
                 "${String.format(US, "%+.0f", b.pnl50)} USDT at 50¢, ${String.format(US, "%+.0f", b.pnl52)} at 52¢, ${String.format(US, "%+.0f", b.pnl55)} at 55¢ · max drop ${b.dd.toInt()}",
                 11.sp, C.Muted)

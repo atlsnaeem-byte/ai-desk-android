@@ -109,7 +109,6 @@ class TraderService : Service() {
         ensureCopyLoop()
         ensureManualLoop()
         ensurePumpLoop()
-        ensureBtc5mLoop()
         ensureStructLoop()
         ensureStratLoop()
         return START_STICKY

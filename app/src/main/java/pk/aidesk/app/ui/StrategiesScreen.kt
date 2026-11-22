@@ -291,36 +291,12 @@ fun PredictionScreen(vm: AppVM, act: MainActivity) {
         TopBar(vm, "Prediction")
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
             item {
-                T("Structure AI · HH/HL/LH/LL on 1m + 5m + 15m · call at each round start", 14.sp, C.Txt, FontWeight.Bold)
+                T("BTC Up / Down 5m · P(UP) ≥ 52% → UP, ≤ 48% → DOWN", 14.sp, C.Txt, FontWeight.Bold)
+                T("Structure AI (HH/HL/LH/LL on 1m + 5m + 15m), one call at each round start", 11.sp, C.Muted)
                 Gap(6.dp)
                 StructCallCard(vm, act, now)
                 Gap(8.dp)
                 StructRecordCard(vm, act)
-                Gap(18.dp)
-                T("BTC Up / Down · in-round confirmed calls (older model)", 14.sp, C.Txt, FontWeight.Bold)
-                Gap(6.dp)
-                val cfg = bv?.cfg
-                Card {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            T("Auto-trade", 14.sp, C.Txt, FontWeight.Bold)
-                            T(when {
-                                cfg == null -> "…"
-                                cfg.mode == "paper" && cfg.record -> "ON (PAPER): the first confirmed call of every round is bet automatically."
-                                cfg.mode == "live" -> "LIVE: Binance Prediction has no trading API, so the app cannot bet for you. It alerts; you bet and tap \"I bet\"."
-                                else -> "OFF: turn on to record calls and paper-bet them automatically."
-                            }, 11.sp, if (cfg?.record == true) C.Green else C.Muted)
-                        }
-                        if (cfg != null) Switch(cfg.record, { vm.saveBtcCfg(cfg.copy(record = it)) },
-                            colors = SwitchDefaults.colors(checkedTrackColor = C.Green, checkedThumbColor = C.Txt))
-                    }
-                    if (cfg?.record == true && !running) T("Needs the scanner running: tap the red bar on the Signals tab.", 11.sp, C.Amber)
-                    T("Manual: when a call is CONFIRMED, use the bet button on the card below.", 10.sp, C.Dim)
-                }
-                Gap(8.dp)
-                Btc5mCard(vm, now)
-                Gap(8.dp)
-                Btc5mRecordCard(vm, act)
                 Gap(24.dp)
             }
         }
