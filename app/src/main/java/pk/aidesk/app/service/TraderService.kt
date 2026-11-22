@@ -310,15 +310,20 @@ class TraderService : Service() {
                 try {
                     if (System.currentTimeMillis() - synced > 600_000) { api.syncTime(); synced = System.currentTimeMillis() }
                     val m = pk.aidesk.app.core.Btc5mStruct.model(this@TraderService)
-                    val call = pk.aidesk.app.core.Btc5mStruct.scan(api, m, cfg.thr)
-                    val isNew = book.recordRound(call)
+                    val R = pk.aidesk.app.core.Btc5mStruct.ROUND
+                    val ph = api.nowMs() % R
+                    // early mode: the call for the NEXT round is made 10 s before it starts, from the still-forming candles
+                    val nextRound = if (cfg.early && ph >= R - 15_000L) (api.nowMs() / R + 1) * R else null
+                    val call = if (cfg.early && nextRound == null) null
+                               else pk.aidesk.app.core.Btc5mStruct.scan(api, m, cfg.thr, nextRound)
+                    val isNew = call != null && book.recordRound(call)
                     val pred = engine.store.keys("prediction")?.let { (k, s) -> pk.aidesk.app.core.PredictionApi(k, s) }
-                    if (isNew) {
+                    if (isNew && call != null) {
                         // same decision path for PAPER and LIVE: quote -> EV gate -> risk -> execute; re-quote every 8 s in the window
                         var step = book.tryEnter(call, cfg, pred, api.nowMs())
                         while (!step.done && api.nowMs() - call.roundStart < cfg.windowSec * 1000L) {
                             book.setStatus(step.text); structTicks.value = System.currentTimeMillis()
-                            delay(8_000)
+                            delay(if (api.nowMs() < call.roundStart + 5_000L) 2_000L else 8_000L)
                             step = book.tryEnter(call, book.cfg(), pred, api.nowMs())
                         }
                         book.setStatus("${hhmmUtc(call.roundStart)} ${call.side} · ${step.text}")
@@ -335,10 +340,12 @@ class TraderService : Service() {
                     val msg = (e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName
                     if (msg != lastErr) engine.store.log("ERROR", "BTC 5m structure: $msg")
                     lastErr = msg
-                    delay(15_000); continue         // retry within the same round (the paper bet still needs <= 30 s)
+                    delay(if (cfg.early) 3_000L else 15_000L); continue         // retry within the same round
                 }
                 val now = api.nowMs()
-                delay((pk.aidesk.app.core.Btc5mStruct.ROUND - now % pk.aidesk.app.core.Btc5mStruct.ROUND) + 3_000L)
+                val R = pk.aidesk.app.core.Btc5mStruct.ROUND
+                val toBoundary = R - now % R
+                delay(if (book.cfg().early) (toBoundary - 10_000L).let { if (it < 1_000L) it + R else it } else toBoundary + 3_000L)
             }
             structWl?.let { if (it.isHeld) it.release() }
         }

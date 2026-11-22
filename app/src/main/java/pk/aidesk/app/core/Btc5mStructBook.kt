@@ -35,12 +35,13 @@ class Btc5mStructBook(private val store: Store) {
         val maxTradesDay: Int = 300,       // 0 = off
         val lossStreak: Int = 4,           // pause after N losses in a row, 0 = off
         val pauseMin: Int = 60,
+        val early: Boolean = false,        // call 10 s BEFORE the round starts (from the still-forming candles)
     ) {
         val thr get() = thrPct / 100
         fun json() = JSONObject().put("v", 2).put("auto", auto).put("mode", mode).put("stake", stake).put("thrPct", thrPct)
             .put("paperCents", paperCents).put("alerts", alerts).put("minP", minP).put("minEdgePct", minEdgePct)
             .put("windowSec", windowSec).put("useQuotes", useQuotes).put("armed", armed).put("killSwitch", killSwitch)
-            .put("dailyLossUsdt", dailyLossUsdt).put("maxTradesDay", maxTradesDay).put("lossStreak", lossStreak).put("pauseMin", pauseMin)
+            .put("dailyLossUsdt", dailyLossUsdt).put("maxTradesDay", maxTradesDay).put("lossStreak", lossStreak).put("pauseMin", pauseMin).put("early", early)
         companion object {
             fun of(o: JSONObject?): Cfg {
                 if (o == null) return Cfg()
@@ -49,7 +50,7 @@ class Btc5mStructBook(private val store: Store) {
                     o.optDouble("paperCents", d.paperCents), o.optBoolean("alerts", d.alerts), o.optDouble("minP", d.minP),
                     o.optDouble("minEdgePct", d.minEdgePct), o.optInt("windowSec", d.windowSec), o.optBoolean("useQuotes", d.useQuotes),
                     o.optBoolean("armed", d.armed), o.optBoolean("killSwitch", d.killSwitch), o.optDouble("dailyLossUsdt", d.dailyLossUsdt),
-                    o.optInt("maxTradesDay", d.maxTradesDay), o.optInt("lossStreak", d.lossStreak), o.optInt("pauseMin", d.pauseMin))
+                    o.optInt("maxTradesDay", d.maxTradesDay), o.optInt("lossStreak", d.lossStreak), o.optInt("pauseMin", d.pauseMin), o.optBoolean("early", d.early))
                 // v2 (2026-11-22): one rule only, P(UP) >= 52% -> UP, <= 48% -> DOWN, every call bet; edge gate off
                 return if (o.optInt("v", 1) < 2) c.copy(thrPct = 52.0, minP = 0.0, minEdgePct = -100.0, maxTradesDay = 300) else c
             }
@@ -112,6 +113,23 @@ class Btc5mStructBook(private val store: Store) {
         })
     }
 
+    /** First time the round's market was seen open (seconds vs the round start) and its listed price: early-call check. */
+    @Synchronized private fun noteMarket(T: Long, now: Long, px: Double?) {
+        saveRounds(raw(ROUNDS).onEach { o ->
+            if (o.getLong("T") == T && !o.has("mkAt")) { o.put("mkAt", (now - T) / 1000); px?.let { o.put("mkPx", it) } }
+        })
+    }
+    fun marketSeen(T: Long): Pair<Long, Double?>? = raw(ROUNDS).firstOrNull { it.getLong("T") == T && it.has("mkAt") }
+        ?.let { it.getLong("mkAt") to dOpt(it, "mkPx") }
+
+    /** Early-call check: (rounds checked, market already open before the round start, average listed price before start). */
+    fun marketStats(): Triple<Int, Int, Double?> {
+        val r = raw(ROUNDS).filter { it.has("mkAt") }
+        val before = r.filter { it.getLong("mkAt") <= 0 }
+        val px = before.mapNotNull { dOpt(it, "mkPx") }
+        return Triple(r.size, before.size, if (px.isEmpty()) null else px.average())
+    }
+
     @Synchronized fun hasBet(T: Long, mode: String) = raw(BETS).any { it.getLong("T") == T && it.getString("mode") == mode }
 
     /** Bet with an effective price per share (cents, fee included) or null = paper price + fee. */
@@ -122,6 +140,7 @@ class Btc5mStructBook(private val store: Store) {
         l += JSONObject().put("id", System.currentTimeMillis()).put("mode", mode).put("T", T).put("side", side)
             .put("share", share).put("stake", stake).put("assumed", cents == null).put("auto", auto)
             .put("orderId", orderId ?: "").put("status", status).put("wp", winP ?: JSONObject.NULL)
+            .put("dt", (System.currentTimeMillis() - T) / 1000)
         saveBets(l)
     }
 
@@ -216,7 +235,10 @@ class Btc5mStructBook(private val store: Store) {
                 val bal = api.balances()
                 plan = api.funding(bal, runCatching { api.walletBalance(wallet) }.getOrNull(), cfg.stake)
                 if (plan == null && mode == "live") return skip("not enough Prediction balance for ${cfg.stake} USDT")
-                market = api.market(T)
+                market = try { api.market(T) } catch (e: UserError) {
+                    if (cfg.early) return Step(false, "round market not open yet (${(now - T) / 1000}s)") else throw e
+                }
+                if (cfg.early) noteMarket(T, now, market.let { if (c.side == "UP") it.up.price else it.down.price })
                 val tok = if (c.side == "UP") market.up else market.down
                 q = api.quote(wallet, tok.tokenId, cfg.stake, minOf(market.slippageBps, 200), plan?.source ?: "MPC")
                 if (q.expireAt > 0 && q.expireAt <= api.nowMs()) return Step(false, "quote expired, retrying")
@@ -242,7 +264,7 @@ class Btc5mStructBook(private val store: Store) {
 
         if (mode == "paper") {
             addBet("paper", T, c.side, price * 100, cost, auto = true, winP = p)
-            noteRound(T, "PAPER ${c.side} at ${String.format(us, "%.1f", price * 100)}¢ · edge ${String.format(us, "%+.1f", edge)}% · $source", price, edge)
+            noteRound(T, "PAPER ${c.side} at ${(now - T) / 1000}s · ${String.format(us, "%.1f", price * 100)}¢ · edge ${String.format(us, "%+.1f", edge)}% · $source", price, edge)
             return Step(true, "paper bet ${c.side} ${String.format(us, "%.2f", cost)} USDT at ${String.format(us, "%.1f", price * 100)}¢ (edge ${String.format(us, "%+.1f", edge)}%)", placed = true)
         }
 
@@ -254,7 +276,7 @@ class Btc5mStructBook(private val store: Store) {
         return try {
             val id = api!!.placeOrder(w, quote, pl.accountType, minOf(mk.slippageBps, 200), pl.source)
             addBet("live", T, c.side, price * 100, cost, auto = true, orderId = id, winP = p)
-            noteRound(T, "LIVE ${c.side} order $id at ${String.format(us, "%.1f", price * 100)}¢ · edge ${String.format(us, "%+.1f", edge)}%", price, edge)
+            noteRound(T, "LIVE ${c.side} at ${(now - T) / 1000}s · order $id · ${String.format(us, "%.1f", price * 100)}¢ · edge ${String.format(us, "%+.1f", edge)}%", price, edge)
             Step(true, "LIVE ${c.side} ${String.format(us, "%.2f", cost)} USDT at ${String.format(us, "%.1f", price * 100)}¢ · order $id", placed = true)
         } catch (e: BinanceException) {
             if (e.status in 400..499) {
@@ -286,11 +308,13 @@ class Btc5mStructBook(private val store: Store) {
 
     fun csv(): String {
         val us = java.util.Locale.US
-        val sb = StringBuilder("type,mode,round_utc_ms,side,p_up,backtest_win_p,price_per_share,edge_pct,open,projected_close,stake,order_id,status,result,pnl,note\n")
+        val sb = StringBuilder("type,mode,round_utc_ms,side,p_up,backtest_win_p,price_per_share,edge_pct,open,projected_close,stake,order_id,status,result,pnl,note,market_open_at_s,market_listed_price,bet_at_s\n")
+        val mk = raw(ROUNDS).filter { it.has("mkAt") }.associate { it.getLong("T") to (it.getLong("mkAt") to dOpt(it, "mkPx")) }
+        val dts = raw(BETS).associate { it.getLong("id") to (if (it.has("dt")) it.getLong("dt").toString() else "") }
         for (r in rounds()) sb.append("round,,${r.T},${r.side},${String.format(us, "%.4f", r.p)},${r.winP ?: ""},${r.price ?: ""},${r.edge?.let { String.format(us, "%.2f", it) } ?: ""}," +
-            "${r.open},${String.format(us, "%.2f", r.projClose)},,,,${r.win?.let { if (it) "WIN" else "LOSS" } ?: if (r.up == 2) "TIE" else ""},,\"${r.note.replace("\"", "'")}\"\n")
+            "${r.open},${String.format(us, "%.2f", r.projClose)},,,,${r.win?.let { if (it) "WIN" else "LOSS" } ?: if (r.up == 2) "TIE" else ""},,\"${r.note.replace("\"", "'")}\",${mk[r.T]?.first ?: ""},${mk[r.T]?.second ?: ""},\n")
         for (b in bets()) sb.append("bet,${b.mode},${b.T},${b.side},,${b.winP ?: ""},${String.format(us, "%.4f", b.share)},,,,${b.stake},${b.orderId ?: ""},${b.status}," +
-            "${b.win?.let { if (it) "WIN" else "LOSS" } ?: if (b.up == 2) "TIE" else ""},${b.pnl?.let { String.format(us, "%.4f", it) } ?: ""},\n")
+            "${b.win?.let { if (it) "WIN" else "LOSS" } ?: if (b.up == 2) "TIE" else ""},${b.pnl?.let { String.format(us, "%.4f", it) } ?: ""},,,,${dts[b.id] ?: ""}\n")
         return sb.toString()
     }
 }

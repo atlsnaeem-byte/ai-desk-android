@@ -79,6 +79,12 @@ object Btc5mStruct {
     class Bars(val t: LongArray, val o: DoubleArray, val h: DoubleArray, val l: DoubleArray, val c: DoubleArray, val tfMin: Int) {
         val size get() = t.size
         fun closeTime(i: Int) = t[i] + tfMin * MIN
+        /** same bars, last one closing at price px (high/low widened) */
+        fun withLast(px: Double): Bars {
+            val n = size; val h2 = h.copyOf(); val l2 = l.copyOf(); val c2 = c.copyOf()
+            c2[n - 1] = px; h2[n - 1] = maxOf(h2[n - 1], px); l2[n - 1] = minOf(l2[n - 1], px)
+            return Bars(t, o, h2, l2, c2, tfMin)
+        }
         /** bars closed by time T */
         fun upTo(T: Long): Bars {
             var n = 0
@@ -175,8 +181,10 @@ object Btc5mStruct {
     }
 
     /** Pure evaluation (testable). tf = bars per timeframe (may include the forming bar; it is ignored). */
-    fun evaluate(m: Model, tf: Map<String, Bars>, now: Long, livePrice: Double, threshold: Double = m.threshold): Call {
-        val T = now / ROUND * ROUND
+    fun evaluate(m: Model, tf: Map<String, Bars>, now: Long, livePrice: Double, threshold: Double = m.threshold,
+                 round: Long? = null): Call {
+        // round = a later round start (early call): bars ending at it are still forming and are used as they are now
+        val T = round ?: (now / ROUND * ROUND)
         val (x, st) = featureVector(tf, T, m.k)
         val p = m.pUp(x)
         val b5 = tf.getValue("m5")
@@ -210,12 +218,20 @@ object Btc5mStruct {
     }
 
     /** Download 1m / 5m / 15m Binance SPOT candles + live price and evaluate the current round. Blocking. */
-    fun scan(api: Binance, m: Model, threshold: Double = m.threshold): Call {
+    fun scan(api: Binance, m: Model, threshold: Double = m.threshold, round: Long? = null): Call {
         val now = api.nowMs()
         val tf = mapOf("m1" to bars(api, "1m", 1), "m5" to bars(api, "5m", 5), "m15" to bars(api, "15m", 15))
         for ((n, b) in tf) for (q in 1 until b.size) if (b.t[q] - b.t[q - 1] != b.tfMin * MIN) throw IllegalStateException("gap in BTC $n bars")
         val px = (api.request("GET", "/api/v3/ticker/price", mapOf("symbol" to Btc5m.SYMBOL), host = Binance.SPOT) as JSONObject)
             .getString("price").toDouble()
+        if (round != null) {
+            // early call: the forming 1m bar must be the one that ends at the round start, else the data is stale
+            val b1 = tf.getValue("m1")
+            if (b1.size == 0 || b1.t.last() != round - MIN) throw IllegalStateException("1m bar ending at the round start not found")
+            // forming bars carry the latest trade; use the live price as their close
+            val upd = tf.mapValues { (_, b) -> if (b.size > 0 && b.closeTime(b.size - 1) == round) b.withLast(px) else b }
+            return evaluate(m, upd, now, px, threshold, round)
+        }
         return evaluate(m, tf, now, px, threshold)
     }
 }

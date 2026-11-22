@@ -463,6 +463,7 @@ class AppVM(app: Application) : AndroidViewModel(app) {
 
     // BTC 5m structure AI (HH/HL/LH/LL on 1m/5m/15m -> one call at each round start) + its paper / live record
     val structCall = MutableStateFlow<pk.aidesk.app.core.Btc5mStruct.Call?>(null)
+    val structNext = MutableStateFlow<pk.aidesk.app.core.Btc5mStruct.Call?>(null)
     val structErr = MutableStateFlow<String?>(null)
     var structModel: pk.aidesk.app.core.Btc5mStruct.Model? = null
         private set
@@ -477,7 +478,13 @@ class AppVM(app: Application) : AndroidViewModel(app) {
                     val m = structModel ?: pk.aidesk.app.core.Btc5mStruct.load(
                         getApplication<Application>().assets.open("btc5m_struct.json").bufferedReader().use { it.readText() }).also { structModel = it }
                     if (System.currentTimeMillis() - structSynced > 600_000) { pub.syncTime(); structSynced = System.currentTimeMillis() }
-                    pk.aidesk.app.core.Btc5mStruct.scan(pub, m, structBook.cfg().thr)
+                    val cfg = structBook.cfg()
+                    val R = pk.aidesk.app.core.Btc5mStruct.ROUND
+                    val now = pub.nowMs()
+                    // early mode: in the last 30 s also show the call for the next round, as it stands now
+                    structNext.value = if (cfg.early && now % R >= R - 30_000L)
+                        runCatching { pk.aidesk.app.core.Btc5mStruct.scan(pub, m, cfg.thr, (now / R + 1) * R) }.getOrNull() else null
+                    pk.aidesk.app.core.Btc5mStruct.scan(pub, m, cfg.thr)
                 }
                 structErr.value = null
             } catch (e: Exception) {
@@ -509,7 +516,7 @@ class AppVM(app: Application) : AndroidViewModel(app) {
                      val paper: pk.aidesk.app.core.Btc5mStructBook.Stats, val paperToday: pk.aidesk.app.core.Btc5mStructBook.Stats,
                      val live: pk.aidesk.app.core.Btc5mStructBook.Stats, val calls: Pair<Int, Int>,
                      val liveToday: pk.aidesk.app.core.Btc5mStructBook.Stats, val status: Pair<Long, String>, val keyHint: String?,
-                     val risk: String?)
+                     val risk: String?, val market: Triple<Int, Int, Double?>)
     val structView = MutableStateFlow<StructView?>(null)
     fun loadStructBook() = viewModelScope.launch {
         structView.value = withContext(Dispatchers.IO) {
@@ -517,7 +524,7 @@ class AppVM(app: Application) : AndroidViewModel(app) {
             val day = System.currentTimeMillis().let { it - (it + 5 * 3_600_000L) % 86_400_000L }     // midnight PKT
             val cfg = b.cfg()
             StructView(cfg, b.bets().reversed(), b.rounds().reversed(), b.stats("paper"), b.stats("paper", day), b.stats("live"), b.callStats(),
-                b.stats("live", day), b.status(), store.keyHint("prediction"), b.riskBlock(cfg, cfg.mode, System.currentTimeMillis()))
+                b.stats("live", day), b.status(), store.keyHint("prediction"), b.riskBlock(cfg, cfg.mode, System.currentTimeMillis()), b.marketStats())
         }
     }
     /** Binance Prediction API (separate key: Reading + Prediction Trading, withdrawals off). */

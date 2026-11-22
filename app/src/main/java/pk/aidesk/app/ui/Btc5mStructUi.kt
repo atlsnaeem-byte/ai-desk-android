@@ -101,6 +101,11 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
             }
         }
         Gap(6.dp)
+        val nx by vm.structNext.collectAsState()
+        nx?.let { n ->
+            T("Next round ${hhmm(n.roundStart)} (call 10 s before start): ${if (n.side == "NONE") "NO CALL" else n.side} · P(UP) ${String.format(US, "%.1f", n.pUp * 100)}% · " +
+                "starts in ${mmss(n.roundStart - now)}", 12.sp, sideCol(n.side), FontWeight.Bold)
+        }
         T("Projected 5m candle: close ${px(c.projClose)} · high ${px(c.projHigh)} · low ${px(c.projLow)}", 12.sp, C.Txt)
         // betting
         if (c.side != "NONE") {
@@ -290,6 +295,17 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         }
         Gap(8.dp)
         // ---- edge gate (PredictAI V7.3.0)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            T("Call timing", 11.sp, C.Muted)
+            Pill("At round start (0:03)", C.Blue, filled = !cfg.early) { vm.saveStructCfg(cfg.copy(early = false)) }
+            Pill("10 s before start", C.Blue, filled = cfg.early) { vm.saveStructCfg(cfg.copy(early = true)) }
+        }
+        bv.market.let { (n, before, px) ->
+            if (n > 0) T("Market check: next round's market was open before its start on $before of $n rounds" +
+                (px?.let { " · listed price then ≈ ${String.format(US, "%.1f", it * 100)}¢" } ?: ""), 11.sp, if (before > 0) C.Green else C.Amber)
+            else if (cfg.early) T("Market check: no rounds checked yet (needs the Prediction key).", 11.sp, C.Muted)
+        }
+        Gap(6.dp)
         T("Price check (optional, same for PAPER and LIVE)", 12.sp, C.Txt, FontWeight.Bold)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Min edge", 11.sp, C.Muted)
