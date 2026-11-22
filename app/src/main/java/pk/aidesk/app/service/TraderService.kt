@@ -139,7 +139,7 @@ class TraderService : Service() {
                 try {
                     val api = engine.client(c)
                     val ev = desk.watch(c, api)
-                    ev.forEach { Notifier.event(this@TraderService, engine, it) }
+                    ev.forEach { Notifier.event(this@TraderService, engine, it, cat = "manual") }
                     if (ev.isNotEmpty()) ticks.value = System.currentTimeMillis()
                     manualTicks.value = System.currentTimeMillis()
                     lastErr = null
@@ -165,7 +165,7 @@ class TraderService : Service() {
                 for (attempt in 0 until 3) { // offline / Binance hiccup: retry after 30 s, 60 s
                     try {
                         val events = engine.cycle()
-                        events.forEach { Notifier.event(this@TraderService, engine, it) }
+                        events.forEach { Notifier.event(this@TraderService, engine, it, cat = "signals") }
                         lastErr = null
                         break
                     } catch (e: UserError) {
@@ -203,7 +203,7 @@ class TraderService : Service() {
             val sh = ShortHunter(engine.store)
             val sc = sh.cfg()
             if (!sc.enabled && !sc.pumpAuto && !sc.annAuto && sh.state(c.mode).open.isEmpty()) return
-            sh.step(c.mode, api) { api.equity() }.forEach { Notifier.event(this, engine, it) }
+            sh.step(c.mode, api) { api.equity() }.forEach { Notifier.event(this, engine, it, cat = "short") }
         } catch (e: Exception) {
             engine.store.log("ERROR", "Short hunter: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")
         }
@@ -217,7 +217,7 @@ class TraderService : Service() {
             val st = engine.store
             if (st.readObj("gold_notified.json")?.optLong("signalTime") == s.signalTime) return   // one alert per signal
             st.writeObj("gold_notified.json", org.json.JSONObject().put("signalTime", s.signalTime))
-            Notifier.info(this, "Gold ${s.sideName} · XAUUSDT 15m",
+            Notifier.infoCat("gold", this, "Gold ${s.sideName} · XAUUSDT 15m",
                     "Asian-range breakout: entry ${Engine.fmt(s.entry)}, stop ${Engine.fmt(s.sl)} (range middle), exit 01:00 PKT. Signal only, not proven.", loud = true)
         } catch (e: Exception) {
             engine.store.log("ERROR", "Gold signal: ${e.message ?: e.javaClass.simpleName}")
@@ -237,7 +237,7 @@ class TraderService : Service() {
             }
             val api = engine.client(c)
             api.syncTime()
-            ph.step(c.mode, api) { api.equity() }.forEach { Notifier.event(this, engine, it) }
+            ph.step(c.mode, api) { api.equity() }.forEach { Notifier.event(this, engine, it, cat = "pump") }
             ensurePumpLoop()
         } catch (e: Exception) {
             engine.store.log("ERROR", "Pump hunter: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")
@@ -268,7 +268,7 @@ class TraderService : Service() {
                     val call = pk.aidesk.app.core.Btc5m.scan(api, pk.aidesk.app.core.Btc5m.model(this@TraderService))
                     if (book.record(call) && cfg.alerts) {
                         val hw = call.histWin?.let { "${(it * 100).toInt()}%" } ?: "-"
-                        Notifier.info(this@TraderService, "BTC 5m CONFIRMED ${call.side} · ${call.e}:00 in",
+                        Notifier.infoCat("predict", this@TraderService, "BTC 5m CONFIRMED ${call.side} · ${call.e}:00 in",
                             "Backtest $hw on similar rounds · ${(call.leftMs / 1000)}s left · " +
                                 (if (cfg.mode == "paper") "paper bet recorded" else "LIVE: bet in Binance only if the ${call.side} price is below ${call.histWin?.let { (it * 100 - 5).toInt() } ?: "-"}¢"),
                             loud = true)
@@ -316,13 +316,14 @@ class TraderService : Service() {
                     val pred0 = engine.store.keys("prediction")?.let { (k, s) -> pk.aidesk.app.core.PredictionApi(k, s) }
                     // early mode, 1 min before: find the next round's market now (list / timeline / search), so at -10 s only
                     // the quote + order remain; the result is recorded (when it was listed, how it was found)
-                    if (cfg.early && ph in (R - 75_000L) until (R - 15_000L)) {
+                    val lead = cfg.leadSec * 1000L
+                    if (cfg.early && ph in (R - 75_000L) until (R - lead - 5_000L)) {
                         if (pred0 != null) runCatching { book.prefetchMarket((api.nowMs() / R + 1) * R, pred0, api.nowMs()) }
                         structTicks.value = System.currentTimeMillis()
-                        delay((R - api.nowMs() % R - 10_000L).coerceAtLeast(0L))
+                        delay((R - api.nowMs() % R - lead).coerceAtLeast(0L))
                         continue
                     }
-                    val nextRound = if (cfg.early && ph >= R - 15_000L) (api.nowMs() / R + 1) * R else null
+                    val nextRound = if (cfg.early && ph >= R - lead - 5_000L) (api.nowMs() / R + 1) * R else null
                     val call = if (cfg.early && nextRound == null) null
                                else pk.aidesk.app.core.Btc5mStruct.scan(api, m, cfg.thr, nextRound)
                     val isNew = call != null && book.recordRound(call)
@@ -341,7 +342,7 @@ class TraderService : Service() {
                         }
                         book.setStatus("${hhmmUtc(call.roundStart)} ${call.side} · ${step.text}")
                         if (cfg.alerts && (step.placed || cfg.mode == "live"))
-                            Notifier.info(this@TraderService, "BTC 5m ${call.side} · win rate ${(call.winP * 100).toInt()}%" +
+                            Notifier.infoCat("predict", this@TraderService, "BTC 5m ${call.side} · win rate ${(call.winP * 100).toInt()}%" +
                                 (if (step.placed) " · ${cfg.mode.uppercase()} BET" else " · skipped"), step.text, loud = cfg.mode == "live" && step.placed)
                     }
                     // LIVE: claim winnings of ended rounds once per round (PredictAI 5m maintenance)
@@ -395,7 +396,7 @@ class TraderService : Service() {
                     if (System.currentTimeMillis() - synced > 600_000) { api.syncTime(); synced = System.currentTimeMillis() }
                     val c = engine.cfg()
                     val ev = book.step(c, api) { engine.client(c) }
-                    ev.forEach { Notifier.event(this@TraderService, engine, it) }
+                    ev.forEach { Notifier.event(this@TraderService, engine, it, cat = "strats") }
                     if (ev.isNotEmpty()) { ticks.value = System.currentTimeMillis(); ensureManualLoop() }
                 } catch (e: Exception) {
                     engine.store.log("ERROR", "Strategies: ${(e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName}")
@@ -428,7 +429,7 @@ class TraderService : Service() {
                     val api = engine.client(c)
                     if (System.currentTimeMillis() - synced > 300_000) { api.syncTime(); synced = System.currentTimeMillis() }
                     val ev = ph.newsStep(c.mode, api) { api.equity() }
-                    ev.forEach { Notifier.event(this@TraderService, engine, it) }
+                    ev.forEach { Notifier.event(this@TraderService, engine, it, cat = "pump") }
                     if (ev.isNotEmpty()) ticks.value = System.currentTimeMillis()
                     lastErr = null
                 } catch (e: Exception) {
@@ -449,7 +450,7 @@ class TraderService : Service() {
             val api = Binance().also { it.syncTime() }
             val ta = TaScanner(engine.store)
             val res = ta.step(api, c.symbols)
-            res.events.forEach { Notifier.event(this, engine, it) }
+            res.events.forEach { Notifier.event(this, engine, it, cat = "course") }
             if (!ta.auto || (res.opened.isEmpty() && res.timeExits.isEmpty())) return
             val trade = engine.client(c).also { it.syncTime() }
             val desk = ManualDesk(engine.store)
@@ -457,7 +458,7 @@ class TraderService : Service() {
             for (sg in res.timeExits) {
                 if (desk.active(c.mode).none { it.symbol == sg.symbol && it.setup.startsWith("Course") }) continue
                 runCatching { desk.closeSymbol(c, trade, sg.symbol) }
-                    .onSuccess { msg -> msg?.let { Notifier.event(this, engine, pk.aidesk.app.core.Event("close", "Course trade closed (time exit)", it, false, sg.symbol)) } }
+                    .onSuccess { msg -> msg?.let { Notifier.event(this, engine, pk.aidesk.app.core.Event("close", "Course trade closed (time exit)", it, false, sg.symbol), cat = "course") } }
                     .onFailure { engine.store.log("ERROR", "Course time exit ${sg.symbol}: ${(it as? BinanceException)?.msg ?: it.message}") }
             }
             // new setups: MARKET order with the signal's SL / TP, sized by Settings > risk per trade and leverage
@@ -467,11 +468,11 @@ class TraderService : Service() {
                 try {
                     val msg = desk.place(c, trade, pk.aidesk.app.core.Ticket(sg.symbol, sg.side, "MARKET", 0.0, sg.sl, sg.tp, c.riskPct,
                         c.leverage, 24, "Course ${sg.tf}: ${sg.title}", ladder = true))
-                    Notifier.event(this, engine, pk.aidesk.app.core.Event("open", "Course trade opened: ${sg.side} ${sg.symbol}", msg, true, sg.symbol))
+                    Notifier.event(this, engine, pk.aidesk.app.core.Event("open", "Course trade opened: ${sg.side} ${sg.symbol}", msg, true, sg.symbol), cat = "course")
                 } catch (e: Exception) {
                     val m = (e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName
                     engine.store.log("ERROR", "Course trade ${sg.symbol}: $m")
-                    Notifier.event(this, engine, pk.aidesk.app.core.Event("error", "Course trade not opened: ${sg.symbol}", m, false, sg.symbol))
+                    Notifier.event(this, engine, pk.aidesk.app.core.Event("error", "Course trade not opened: ${sg.symbol}", m, false, sg.symbol), cat = "course")
                 }
             }
             ensureManualLoop()
@@ -506,7 +507,7 @@ class TraderService : Service() {
                     val api = engine.client(c)
                     if (System.currentTimeMillis() - copySynced > 300_000) { api.syncTime(); copySynced = System.currentTimeMillis() }
                     val ev = copyBot.step(c.mode, api, pub)
-                    ev.forEach { Notifier.event(this@TraderService, engine, it) }
+                    ev.forEach { Notifier.event(this@TraderService, engine, it, cat = "copy") }
                     if (ev.isNotEmpty()) ticks.value = System.currentTimeMillis()
                     copyTicks.value = System.currentTimeMillis()
                 } catch (e: Exception) {

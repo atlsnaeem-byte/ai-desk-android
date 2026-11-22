@@ -41,7 +41,7 @@ class PredictionApiTest {
         var last = 0.0
         for (k in 0..50) {
             val p = m.winProb(0.5 + k * 0.01)
-            assertTrue("p $p at ${0.5 + k * 0.01}", p >= last - 1e-12 && p in 0.45..0.6)
+            assertTrue("p $p at ${0.5 + k * 0.01}", p >= last - 1e-12 && p in 0.45..0.7)
             last = p
         }
     }

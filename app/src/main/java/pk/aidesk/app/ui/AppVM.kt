@@ -482,7 +482,7 @@ class AppVM(app: Application) : AndroidViewModel(app) {
                     val R = pk.aidesk.app.core.Btc5mStruct.ROUND
                     val now = pub.nowMs()
                     // early mode: in the last 30 s also show the call for the next round, as it stands now
-                    structNext.value = if (cfg.early && now % R >= R - 30_000L)
+                    structNext.value = if (cfg.early && now % R >= R - maxOf(30_000L, cfg.leadSec * 1000L + 5_000L))
                         runCatching { pk.aidesk.app.core.Btc5mStruct.scan(pub, m, cfg.thr, (now / R + 1) * R) }.getOrNull() else null
                     pk.aidesk.app.core.Btc5mStruct.scan(pub, m, cfg.thr)
                 }

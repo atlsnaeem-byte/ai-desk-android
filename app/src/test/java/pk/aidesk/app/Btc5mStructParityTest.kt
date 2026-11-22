@@ -7,9 +7,12 @@ import org.junit.Test
 import pk.aidesk.app.core.Btc5mStruct
 import kotlin.math.abs
 
-/** btc5m_struct_fixture.json comes from Documents/BTC Structure 5m AI/export_app.py: same features and model outputs as Python. */
+/** btc5m_struct_fixture.json comes from Documents/BTC Structure 5m AI/export_flow.py: same structure + order-flow features
+ *  and the same model outputs as Python (LightGBM). */
 class Btc5mStructParityTest {
     private fun res(n: String) = javaClass.classLoader!!.getResource(n)!!.readText()
+    private fun d(o: JSONObject, x: String) = o.getJSONArray(x).let { a -> DoubleArray(a.length()) { a.getDouble(it) } }
+    private fun l(o: JSONObject, x: String) = o.getJSONArray(x).let { a -> LongArray(a.length()) { a.getLong(it) } }
 
     @Test
     fun structMatchesPython() {
@@ -22,19 +25,30 @@ class Btc5mStructParityTest {
             val bo = cs.getJSONObject("bars")
             val tf = Btc5mStruct.TFS.associate { (n, mins) ->
                 val b = bo.getJSONObject(n)
-                fun d(x: String) = b.getJSONArray(x).let { a -> DoubleArray(a.length()) { a.getDouble(it) } }
-                val t = b.getJSONArray("t").let { a -> LongArray(a.length()) { a.getLong(it) } }
-                n to Btc5mStruct.Bars(t, d("o"), d("h"), d("l"), d("c"), mins)
+                val t = l(b, "t")
+                var v = DoubleArray(t.size); var tb = DoubleArray(t.size)
+                if (n == "m1" && cs.has("spot")) {
+                    // volume / taker-buy of the last 70 bars (all the flow features use)
+                    val sp = cs.getJSONObject("spot"); val st = l(sp, "t"); val sv = d(sp, "v"); val stb = d(sp, "tb")
+                    val at = t.indices.associateBy { t[it] }
+                    for (i in st.indices) at[st[i]]?.let { v[it] = sv[i]; tb[it] = stb[i] }
+                }
+                n to Btc5mStruct.Bars(t, d(b, "o"), d(b, "h"), d(b, "l"), d(b, "c"), mins, v, tb)
             }
-            val (x, _) = Btc5mStruct.featureVector(tf, T, m.k)
-            val want = cs.getJSONArray("feats").let { a -> DoubleArray(a.length()) { a.getDouble(it) } }
+            val flow = if (cs.has("perp")) {
+                val p = cs.getJSONObject("perp"); val r = cs.getJSONObject("prem")
+                val pt = l(p, "t"); val rt = l(r, "t")
+                Btc5mStruct.FlowIn(Btc5mStruct.Bars(pt, d(p, "c"), d(p, "c"), d(p, "c"), d(p, "c"), 1, d(p, "v"), d(p, "tb")),
+                    Btc5mStruct.Bars(rt, d(r, "c"), d(r, "c"), d(r, "c"), d(r, "c"), 1))
+            } else null
+            val (x, _) = Btc5mStruct.featureVector(tf, T, m.k, if (m.flow) flow else null)
+            val want = d(cs, "feats")
             if (x.size != want.size) { bad += "case $k: ${x.size} features vs ${want.size}"; continue }
             for (i in x.indices) if (abs(x[i] - want[i]) > 1e-6 * maxOf(1.0, abs(want[i]))) bad += "case $k feat $i: ${x[i]} vs ${want[i]}"
-            val out: JSONObject = cs.getJSONObject("out")
+            val out = cs.getJSONObject("out")
             val got = mapOf("up" to m.pUp(x), "y_close" to m.yClose.raw(x), "y_high" to m.yHigh.raw(x), "y_low" to m.yLow.raw(x))
             for ((n, v) in got) if (abs(v - out.getDouble(n)) > 1e-6) bad += "case $k $n: $v vs ${out.getDouble(n)}"
-            // evaluate() a few seconds into the round must give the same P(UP) (forming bars are ignored)
-            val call = Btc5mStruct.evaluate(m, tf, T + 3_000, tf.getValue("m1").c.last())
+            val call = Btc5mStruct.evaluate(m, tf, T + 3_000, tf.getValue("m1").c.last(), flow = flow)
             if (abs(call.pUp - out.getDouble("up")) > 1e-9) bad += "case $k evaluate p: ${call.pUp}"
         }
         assertTrue(bad.take(30).joinToString("\n"), bad.isEmpty())

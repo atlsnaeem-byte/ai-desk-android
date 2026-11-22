@@ -81,7 +81,7 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
             T(mmss(left), 15.sp, if (left < 60_000) C.Amber else C.Txt, FontWeight.SemiBold, mono = true)
         }
         Gap(4.dp)
-        T("P(UP) ${String.format(US, "%.1f", c.pUp * 100)}% · " + (if (cfg.thrPct <= 50.0) "every round: ≥ 50% → UP, else DOWN" else "≥ 52% → UP, ≤ 48% → DOWN"),
+        T("P(UP) ${String.format(US, "%.1f", c.pUp * 100)}% · " + (if (cfg.thrPct <= 50.0) "every round: ≥ 50% → UP, else DOWN" else "≥ ${cfg.thrPct.toInt()}% → UP, ≤ ${(100 - cfg.thrPct).toInt()}% → DOWN"),
             12.sp, C.Muted)
         T("Price to beat ${px(c.open)} → now ${px(c.price)} (${String.format(US, "%+.1f", c.moveBps)} bps)",
             12.sp, if (c.price >= c.open) C.Green else C.Red)
@@ -103,7 +103,7 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
         Gap(6.dp)
         val nx by vm.structNext.collectAsState()
         nx?.let { n ->
-            T("Next round ${hhmm(n.roundStart)} (call 10 s before start): ${if (n.side == "NONE") "NO CALL" else n.side} · P(UP) ${String.format(US, "%.1f", n.pUp * 100)}% · " +
+            T("Next round ${hhmm(n.roundStart)} (call ${cfg.leadSec} s before start): ${if (n.side == "NONE") "NO CALL" else n.side} · P(UP) ${String.format(US, "%.1f", n.pUp * 100)}% · " +
                 "starts in ${mmss(n.roundStart - now)}", 12.sp, sideCol(n.side), FontWeight.Bold)
         }
         T("Projected 5m candle: close ${px(c.projClose)} · high ${px(c.projHigh)} · low ${px(c.projLow)}", 12.sp, C.Txt)
@@ -300,14 +300,15 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         // ---- edge gate (PredictAI V7.3.0)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Rule", 11.sp, C.Muted)
-            Pill("52% rule", C.Blue, filled = cfg.thrPct > 50.0) { vm.saveStructCfg(cfg.copy(thrPct = 52.0)) }
-            Pill("Every round", C.Blue, filled = cfg.thrPct <= 50.0) { vm.saveStructCfg(cfg.copy(thrPct = 50.0)) }
+            for ((lab, thr) in listOf("52%" to 52.0, "54%" to 54.0, "56%" to 56.0, "Every round" to 50.0))
+                Pill(lab, C.Blue, filled = cfg.thrPct == thr) { vm.saveStructCfg(cfg.copy(thrPct = thr)) }
         }
         Gap(4.dp)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Call timing", 11.sp, C.Muted)
-            Pill("At round start (0:03)", C.Blue, filled = !cfg.early) { vm.saveStructCfg(cfg.copy(early = false)) }
-            Pill("10 s before start", C.Blue, filled = cfg.early) { vm.saveStructCfg(cfg.copy(early = true)) }
+            Pill("At start", C.Blue, filled = !cfg.early) { vm.saveStructCfg(cfg.copy(early = false)) }
+            Pill("10 s before", C.Blue, filled = cfg.early && cfg.leadSec == 10) { vm.saveStructCfg(cfg.copy(early = true, leadSec = 10)) }
+            Pill("30 s before", C.Blue, filled = cfg.early && cfg.leadSec == 30) { vm.saveStructCfg(cfg.copy(early = true, leadSec = 30)) }
         }
         bv.market.let { (n, before, px) ->
             if (n > 0) T("Market check: next round's market was open before its start on $before of $n rounds" +
@@ -322,7 +323,7 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
             for (e in listOf(0.0, 2.0, 5.0)) Pill("${e.toInt()}%", C.Blue, filled = cfg.minEdgePct == e) { vm.saveStructCfg(cfg.copy(minEdgePct = e, minP = 0.0)) }
         }
         Gap(4.dp)
-        if (cfg.early) T("Buys at 10 s before the round starts (e.g. 12:54:50 for the 12:55 round). If the buy can't be made " +
+        if (cfg.early) T("Buys at ${cfg.leadSec} s before the round starts (e.g. 12:54:${60 - cfg.leadSec} for the 12:55 round). If the buy can't be made " +
             "before the start, that round is skipped: no buying after the start.", 11.sp, C.Muted)
         else Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Entry window", 11.sp, C.Muted)
@@ -346,16 +347,16 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         // ---- Prediction API key
         PredKeyBox(vm, bv.keyHint)
         Gap(8.dp)
-        T("Backtest (1-second data, 23 Sep – 22 Nov 2026, $1 per bet, 2% fee: win +0.96 / loss −1)", 12.sp, C.Txt, FontWeight.Bold)
-        for ((lab, every, early, txt) in listOf(
-            listOf("52% rule · 10 s before", false, true, "153/day · won 52.9% · +$348 · +$5.70/day · worst day −$29 · max drop $34"),
-            listOf("52% rule · at start", false, false, "154/day · won 52.8% · +$317 · +$5.20/day · worst day −$24 · max drop $29"),
-            listOf("Every round · 10 s before", true, true, "283/day · won 52.0% · +$340 · +$5.58/day · worst day −$37 · max drop $49"),
-            listOf("Every round · at start", true, false, "283/day · won 51.8% · +$278 · +$4.55/day · worst day −$45 · max drop $57"))) {
-            val on = (cfg.thrPct <= 50.0) == every && cfg.early == early
-            T("${if (on) "▶ " else "   "}$lab: $txt", 11.sp, if (on) C.Txt else C.Muted, if (on) FontWeight.Bold else FontWeight.Normal)
+        T("Backtest · structure AI + order flow (${m?.testStart ?: ""} → ${m?.testEnd ?: ""}, ${m?.days ?: 180} days walk-forward, \$1 per bet, 2% fee)", 12.sp, C.Txt, FontWeight.Bold)
+        for (b in (m?.backtest ?: emptyList()).sortedByDescending { it.thr }) {
+            val on = kotlin.math.abs(cfg.thrPct / 100 - b.thr) < 1e-6
+            val lab = if (b.thr <= 0.5) "Every round" else "${(b.thr * 100).toInt()}% rule"
+            T("${if (on) "▶ " else "   "}$lab: ${b.perDay.toInt()}/day · won ${String.format(US, "%.1f", b.win * 100)}% · " +
+                "at 50¢ ${String.format(US, "%+.0f", b.pnl50)} · at 54¢ ${if (b.pnl54.isNaN()) "-" else String.format(US, "%+.0f", b.pnl54)} · max drop ${b.dd.toInt()}",
+                11.sp, if (on) C.Txt else C.Muted, if (on) FontWeight.Bold else FontWeight.Normal)
         }
-        T("Break-even win rate is 51% at a 50¢ share. Every round has a thinner margin: 1¢ more per share removes most of its profit.", 10.sp, C.Dim)
+        T("You pay about 54¢ per share with the fee on real Binance quotes, so the \"at 54¢\" column is the realistic one. " +
+            "Calling 10 or 30 s before the start tested as accurate as at the start (1-second data, 60 days).", 10.sp, C.Dim)
         Gap(10.dp)
         val us = US
         @Composable fun stat(label: String, s: Btc5mStructBook.Stats) {

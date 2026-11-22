@@ -173,6 +173,18 @@ fun SettingsScreen(vm: AppVM, act: MainActivity) {
                     onPlus = { save(cfg.copy(quietEnd = (cfg.quietEnd + 1) % 24)) })
             }
 
+            SectionTitle("Notifications")
+            run {
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                var tick by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(0) }
+                for ((cat, label) in pk.aidesk.app.service.Notifier.CATS) {
+                    val on = tick.let { pk.aidesk.app.service.Notifier.enabled(ctx, cat) }
+                    SwitchRow(label, if (on) "On" else "Off: no notifications from this part (errors still notify)", on) {
+                        pk.aidesk.app.service.Notifier.setEnabled(ctx, cat, it); tick++
+                    }
+                }
+            }
+
             SectionTitle("Trading")
             SliderRow("Min EV (signal strength)", cfg.minEvR.toFloat(), 0f..1f, 19, { String.format(Locale.US, "%+.2fR", it) }, C.Blue,
                 "A signal is STRONG (and auto-traded) only when its expected value is at least this. " +

@@ -22,7 +22,7 @@ class Btc5mStructBook(private val store: Store) {
         val auto: Boolean = true,          // background loop: call + auto bet every round
         val mode: String = "paper",        // paper | live
         val stake: Double = 1.0,           // USDT per bet (LIVE minimum 1.5)
-        val thrPct: Double = 52.0,         // call when P(UP) >= 52% -> UP, <= 48% -> DOWN
+        val thrPct: Double = 56.0,         // call when P(UP) >= 52% -> UP, <= 48% -> DOWN
         val paperCents: Double = 50.0,     // paper fill price when no Binance quote is available
         val alerts: Boolean = true,
         val minP: Double = 0.0,            // min backtest win rate of the called side (0 = off)
@@ -35,13 +35,14 @@ class Btc5mStructBook(private val store: Store) {
         val maxTradesDay: Int = 0,         // 0 = off
         val lossStreak: Int = 0,           // pause after N losses in a row, 0 = off
         val pauseMin: Int = 60,
-        val early: Boolean = true,         // call 10 s BEFORE the round starts (from the still-forming candles)
+        val early: Boolean = true,         // call BEFORE the round starts (from the still-forming candles)
+        val leadSec: Int = 30,             // ... this many seconds before (10 or 30)
     ) {
         val thr get() = thrPct / 100
-        fun json() = JSONObject().put("v", 3).put("auto", auto).put("mode", mode).put("stake", stake).put("thrPct", thrPct)
+        fun json() = JSONObject().put("v", 4).put("auto", auto).put("mode", mode).put("stake", stake).put("thrPct", thrPct)
             .put("paperCents", paperCents).put("alerts", alerts).put("minP", minP).put("minEdgePct", minEdgePct)
             .put("windowSec", windowSec).put("useQuotes", useQuotes).put("armed", armed).put("killSwitch", killSwitch)
-            .put("dailyLossUsdt", dailyLossUsdt).put("maxTradesDay", maxTradesDay).put("lossStreak", lossStreak).put("pauseMin", pauseMin).put("early", early)
+            .put("dailyLossUsdt", dailyLossUsdt).put("maxTradesDay", maxTradesDay).put("lossStreak", lossStreak).put("pauseMin", pauseMin).put("early", early).put("leadSec", leadSec)
         companion object {
             fun of(o: JSONObject?): Cfg {
                 if (o == null) return Cfg()
@@ -50,12 +51,14 @@ class Btc5mStructBook(private val store: Store) {
                     o.optDouble("paperCents", d.paperCents), o.optBoolean("alerts", d.alerts), o.optDouble("minP", d.minP),
                     o.optDouble("minEdgePct", d.minEdgePct), o.optInt("windowSec", d.windowSec), o.optBoolean("useQuotes", d.useQuotes),
                     o.optBoolean("armed", d.armed), o.optBoolean("killSwitch", d.killSwitch), o.optDouble("dailyLossUsdt", d.dailyLossUsdt),
-                    o.optInt("maxTradesDay", d.maxTradesDay), o.optInt("lossStreak", d.lossStreak), o.optInt("pauseMin", d.pauseMin), o.optBoolean("early", d.early))
+                    o.optInt("maxTradesDay", d.maxTradesDay), o.optInt("lossStreak", d.lossStreak), o.optInt("pauseMin", d.pauseMin), o.optBoolean("early", d.early), o.optInt("leadSec", 10))
                 // v2 (2026-11-22): one rule only, P(UP) >= 52% -> UP, <= 48% -> DOWN, every call bet; edge gate off
                 // v3 (2026-11-22): exactly the 1-second backtest that made +$322 in 60 days: 52% rule, call + buy 10 s before the
                 // round start, every call bet ($1, no price check), no daily / streak / trade-count limits, no kill switch
-                return if (o.optInt("v", 1) < 3) c.copy(thrPct = 52.0, minP = 0.0, minEdgePct = -100.0, early = true, stake = if (c.mode == "live") maxOf(c.stake, 1.5) else 1.0,
-                    paperCents = 50.0, dailyLossUsdt = 0.0, maxTradesDay = 0, lossStreak = 0, killSwitch = false) else c.copy(killSwitch = false)
+                return if (o.optInt("v", 1) < 3) c.copy(minP = 0.0, minEdgePct = -100.0, early = true, stake = if (c.mode == "live") maxOf(c.stake, 1.5) else 1.0,
+                    paperCents = 50.0, dailyLossUsdt = 0.0, maxTradesDay = 0, lossStreak = 0, killSwitch = false, thrPct = 56.0, leadSec = 30)
+                    // v4 (2026-11-23): order-flow model; 56% rule (the only one profitable at the ~54c real price), call 30 s before
+                    else if (o.optInt("v", 1) < 4) c.copy(killSwitch = false, thrPct = 56.0, early = true, leadSec = 30) else c.copy(killSwitch = false)
             }
         }
     }

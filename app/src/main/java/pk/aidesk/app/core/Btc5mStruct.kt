@@ -29,11 +29,12 @@ object Btc5mStruct {
     }
 
     class Bt(val thr: Double, val perDay: Double, val win: Double, val pnl50: Double, val pnl52: Double, val pnl55: Double,
-             val dd: Double, val trades: Int)
+             val dd: Double, val trades: Int, val pnl54: Double = Double.NaN)
 
     class Model(val up: Gbdt, val yClose: Gbdt, val yHigh: Gbdt, val yLow: Gbdt, val threshold: Double, val k: Int,
                 val testStart: String, val testEnd: String, val days: Int, val backtest: List<Bt>,
-                val calConf: DoubleArray = doubleArrayOf(0.5, 1.0), val calP: DoubleArray = doubleArrayOf(0.5, 0.5)) {
+                val calConf: DoubleArray = doubleArrayOf(0.5, 1.0), val calP: DoubleArray = doubleArrayOf(0.5, 0.5),
+                val flow: Boolean = false) {
         fun pUp(x: DoubleArray) = 1.0 / (1.0 + exp(-up.raw(x)))
         fun bt(thr: Double) = backtest.minByOrNull { kotlin.math.abs(it.thr - thr) }
         /** Out-of-sample win rate of the called side at this model confidence (isotonic, 6-month backtest). */
@@ -67,29 +68,38 @@ object Btc5mStruct {
         val ba = o.getJSONArray("backtest")
         val bt = (0 until ba.length()).map { ba.getJSONObject(it) }.map {
             Bt(it.getDouble("thr"), it.getDouble("per_day"), it.getDouble("win"), it.getDouble("pnl50"), it.getDouble("pnl52"),
-                it.getDouble("pnl55"), it.getDouble("dd"), it.getInt("trades"))
+                it.getDouble("pnl55"), it.getDouble("dd"), it.getInt("trades"), it.optDouble("pnl54"))
         }
         val cal = o.optJSONObject("calibration")
         return Model(gb("up"), gb("y_close"), gb("y_high"), gb("y_low"), o.getDouble("threshold"), o.getInt("swing_k"),
             o.getString("test_start"), o.getString("test_end"), o.getInt("days"), bt,
-            cal?.let { dbls(it.getJSONArray("conf")) } ?: doubleArrayOf(0.5, 1.0), cal?.let { dbls(it.getJSONArray("p")) } ?: doubleArrayOf(0.5, 0.5))
+            cal?.let { dbls(it.getJSONArray("conf")) } ?: doubleArrayOf(0.5, 1.0), cal?.let { dbls(it.getJSONArray("p")) } ?: doubleArrayOf(0.5, 0.5),
+            o.optBoolean("flow", false))
     }
 
     /** OHLC bars of one timeframe (open times ascending). */
-    class Bars(val t: LongArray, val o: DoubleArray, val h: DoubleArray, val l: DoubleArray, val c: DoubleArray, val tfMin: Int) {
+    class Bars(val t: LongArray, val o: DoubleArray, val h: DoubleArray, val l: DoubleArray, val c: DoubleArray, val tfMin: Int,
+               val v: DoubleArray = DoubleArray(t.size), val tb: DoubleArray = DoubleArray(t.size)) {
         val size get() = t.size
         fun closeTime(i: Int) = t[i] + tfMin * MIN
         /** same bars, last one closing at price px (high/low widened) */
         fun withLast(px: Double): Bars {
             val n = size; val h2 = h.copyOf(); val l2 = l.copyOf(); val c2 = c.copyOf()
             c2[n - 1] = px; h2[n - 1] = maxOf(h2[n - 1], px); l2[n - 1] = minOf(l2[n - 1], px)
-            return Bars(t, o, h2, l2, c2, tfMin)
+            return Bars(t, o, h2, l2, c2, tfMin, v, tb)
         }
         /** bars closed by time T */
         fun upTo(T: Long): Bars {
             var n = 0
             while (n < size && closeTime(n) <= T) n++
-            return Bars(t.copyOf(n), o.copyOf(n), h.copyOf(n), l.copyOf(n), c.copyOf(n), tfMin)
+            return Bars(t.copyOf(n), o.copyOf(n), h.copyOf(n), l.copyOf(n), c.copyOf(n), tfMin, v.copyOf(n), tb.copyOf(n))
+        }
+        /** last bar's volume scaled to a full minute (early call: the forming bar has only part of its minute) */
+        fun scaledLast(fraction: Double): Bars {
+            if (size == 0 || fraction <= 0 || fraction >= 1) return this
+            val v2 = v.copyOf(); val tb2 = tb.copyOf()
+            v2[size - 1] = v2[size - 1] / fraction; tb2[size - 1] = tb2[size - 1] / fraction
+            return Bars(t, o, h, l, c, tfMin, v2, tb2)
         }
     }
 
@@ -182,10 +192,10 @@ object Btc5mStruct {
 
     /** Pure evaluation (testable). tf = bars per timeframe (may include the forming bar; it is ignored). */
     fun evaluate(m: Model, tf: Map<String, Bars>, now: Long, livePrice: Double, threshold: Double = m.threshold,
-                 round: Long? = null): Call {
+                 round: Long? = null, flow: FlowIn? = null): Call {
         // round = a later round start (early call): bars ending at it are still forming and are used as they are now
         val T = round ?: (now / ROUND * ROUND)
-        val (x, st) = featureVector(tf, T, m.k)
+        val (x, st) = featureVector(tf, T, m.k, if (m.flow) (flow ?: throw IllegalStateException("order-flow data missing")) else null)
         val p = m.pUp(x)
         val b5 = tf.getValue("m5")
         val fi = b5.t.indexOfLast { it == T }
@@ -198,9 +208,10 @@ object Btc5mStruct {
     }
 
     /** 36 features for round T from bars of each TF (only bars closed by T are used). Order = structure.FEATURES. */
-    fun featureVector(tf: Map<String, Bars>, T: Long, k: Int): Pair<DoubleArray, Map<String, Tf>> {
+    fun featureVector(tf: Map<String, Bars>, T: Long, k: Int, flow: FlowIn? = null): Pair<DoubleArray, Map<String, Tf>> {
         val st = TFS.associate { (n, _) -> n to structure(tf.getValue(n).upTo(T), k) }
-        val x = DoubleArray(NF * 3 + 3)
+        val x = DoubleArray(NF * 3 + 3 + (if (flow != null) NFLOW else 0))
+        if (flow != null) flowFeatures(tf.getValue("m1").upTo(T), flow.perp, flow.prem).copyInto(x, NF * 3 + 3)
         TFS.forEachIndexed { q, (n, _) -> st.getValue(n).f.copyInto(x, q * NF) }
         x[NF * 3] = (st.getValue("m1").trend + st.getValue("m5").trend + st.getValue("m15").trend).toDouble()
         val hr = ((T / 3_600_000L) % 24).toDouble()
@@ -209,12 +220,55 @@ object Btc5mStruct {
         return x to st
     }
 
-    private fun bars(api: Binance, interval: String, tfMin: Int): Bars {
-        val a = api.request("GET", "/api/v3/klines", mapOf("symbol" to Btc5m.SYMBOL, "interval" to interval, "limit" to 300), host = Binance.SPOT) as JSONArray
+    private fun bars(api: Binance, interval: String, tfMin: Int, path: String = "/api/v3/klines", host: String = Binance.SPOT, limit: Int = 300): Bars {
+        val a = api.request("GET", path, mapOf("symbol" to Btc5m.SYMBOL, "interval" to interval, "limit" to limit), host = host) as JSONArray
         val r = (0 until a.length()).map { a.getJSONArray(it) }
-        return Bars(LongArray(r.size) { r[it].getLong(0) }, DoubleArray(r.size) { r[it].getString(1).toDouble() },
-            DoubleArray(r.size) { r[it].getString(2).toDouble() }, DoubleArray(r.size) { r[it].getString(3).toDouble() },
-            DoubleArray(r.size) { r[it].getString(4).toDouble() }, tfMin)
+        fun d(i: Int, k: Int) = r[i].getString(k).toDoubleOrNull() ?: 0.0
+        return Bars(LongArray(r.size) { r[it].getLong(0) }, DoubleArray(r.size) { d(it, 1) }, DoubleArray(r.size) { d(it, 2) },
+            DoubleArray(r.size) { d(it, 3) }, DoubleArray(r.size) { d(it, 4) }, tfMin, DoubleArray(r.size) { d(it, 5) }, DoubleArray(r.size) { d(it, 9) })
+    }
+
+    /** Order flow inputs: BTCUSDT perpetual 1m klines (close, volume, taker buy) + perp premium index 1m (close). */
+    class FlowIn(val perp: Bars, val prem: Bars)
+    const val NFLOW = 12
+
+    /**
+     * flow.py flow_features at the last spot 1m bar j: taker-buy share (spot / perp) over 1/3/5 bars, 5-bar volume vs the
+     * 60-bar mean (spot / perp), premium index basis + 5-bar change, perp minus spot return over 1/5 bars (bps).
+     * perp / prem are aligned to the spot bars by open time (close carried forward, volume 0 when a minute is missing).
+     */
+    fun flowFeatures(b: Bars, perp: Bars, prem: Bars): DoubleArray {
+        val j = b.size - 1
+        val n0 = maxOf(0, j - 69)
+        val pi = HashMap<Long, Int>(perp.size * 2).also { m -> for (i in 0 until perp.size) m[perp.t[i]] = i }
+        val ri = HashMap<Long, Int>(prem.size * 2).also { m -> for (i in 0 until prem.size) m[prem.t[i]] = i }
+        val len = j - n0 + 1
+        val pc = DoubleArray(len); val pv = DoubleArray(len); val ptb = DoubleArray(len); val rc = DoubleArray(len)
+        var lp = Double.NaN; var lr = Double.NaN
+        for (q in 0 until len) {
+            val t = b.t[n0 + q]
+            pi[t]?.let { lp = perp.c[it]; pv[q] = perp.v[it]; ptb[q] = perp.tb[it] }
+            ri[t]?.let { lr = prem.c[it] }
+            pc[q] = lp; rc[q] = lr
+        }
+        val J = len - 1
+        val sv = DoubleArray(len) { b.v[n0 + it] }; val stb = DoubleArray(len) { b.tb[n0 + it] }; val sc = DoubleArray(len) { b.c[n0 + it] }
+        fun sum(a: DoubleArray, n: Int): Double { var s = 0.0; for (q in J - n + 1..J) s += a[q]; return s }
+        fun ratio(v: DoubleArray, tb: DoubleArray, n: Int): Double { val vs = sum(v, n); return if (vs > 0) sum(tb, n) / maxOf(vs, 1e-12) - 0.5 else 0.0 }
+        fun vz(v: DoubleArray): Double {
+            val m = minOf(60, len)
+            var s = 0.0; for (q in J - m + 1..J) s += v[q]
+            val mean = if (m >= 30) s / m else 0.0
+            return sum(v, 5) / maxOf(mean * 5, 1e-9)
+        }
+        val f = DoubleArray(NFLOW)
+        f[0] = ratio(sv, stb, 1); f[1] = ratio(pv, ptb, 1); f[2] = ratio(sv, stb, 3); f[3] = ratio(pv, ptb, 3)
+        f[4] = ratio(sv, stb, 5); f[5] = ratio(pv, ptb, 5); f[6] = vz(sv); f[7] = vz(pv)
+        f[8] = rc[J] * 1e4; f[9] = (rc[J] - rc[J - 5]) * 1e4
+        f[10] = ((pc[J] / pc[J - 1] - 1) - (sc[J] / sc[J - 1] - 1)) * 1e4
+        f[11] = ((pc[J] / pc[J - 5] - 1) - (sc[J] / sc[J - 5] - 1)) * 1e4
+        for (i in f.indices) if (!f[i].isFinite()) f[i] = 0.0
+        return f
     }
 
     /** Download 1m / 5m / 15m Binance SPOT candles + live price and evaluate the current round. Blocking. */
@@ -224,14 +278,22 @@ object Btc5mStruct {
         for ((n, b) in tf) for (q in 1 until b.size) if (b.t[q] - b.t[q - 1] != b.tfMin * MIN) throw IllegalStateException("gap in BTC $n bars")
         val px = (api.request("GET", "/api/v3/ticker/price", mapOf("symbol" to Btc5m.SYMBOL), host = Binance.SPOT) as JSONObject)
             .getString("price").toDouble()
+        var flow = if (m.flow) FlowIn(bars(api, "1m", 1, "/fapi/v1/klines", Binance.MAINNET, 100),
+            bars(api, "1m", 1, "/fapi/v1/premiumIndexKlines", Binance.MAINNET, 100)) else null
         if (round != null) {
             // early call: the forming 1m bar must be the one that ends at the round start, else the data is stale
             val b1 = tf.getValue("m1")
             if (b1.size == 0 || b1.t.last() != round - MIN) throw IllegalStateException("1m bar ending at the round start not found")
             // forming bars carry the latest trade; use the live price as their close
-            val upd = tf.mapValues { (_, b) -> if (b.size > 0 && b.closeTime(b.size - 1) == round) b.withLast(px) else b }
-            return evaluate(m, upd, now, px, threshold, round)
+            val upd = tf.mapValues { (_, b) -> if (b.size > 0 && b.closeTime(b.size - 1) == round) b.withLast(px) else b }.toMutableMap()
+            // forming 1m bars hold only part of their minute: scale their volume to a full minute for the volume features
+            val frac = ((now - (round - MIN)).toDouble() / MIN).coerceIn(0.05, 1.0)
+            upd["m1"] = upd.getValue("m1").scaledLast(frac)
+            flow = flow?.let { f -> FlowIn(if (f.perp.size > 0 && f.perp.t.last() == round - MIN) f.perp.scaledLast(frac) else f.perp, f.prem) }
+            return evaluate(m, upd, now, px, threshold, round, flow)
         }
-        return evaluate(m, tf, now, px, threshold)
+        // at the round start: only closed bars count (the forming perp / premium bar is dropped)
+        flow = flow?.let { f -> FlowIn(f.perp.upTo(now / ROUND * ROUND), f.prem.upTo(now / ROUND * ROUND)) }
+        return evaluate(m, tf, now, px, threshold, null, flow)
     }
 }

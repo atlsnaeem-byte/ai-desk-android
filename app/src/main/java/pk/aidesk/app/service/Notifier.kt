@@ -89,7 +89,19 @@ object Notifier {
         return if (c.quietStart < c.quietEnd) h in c.quietStart until c.quietEnd else h >= c.quietStart || h < c.quietEnd
     }
 
-    fun event(ctx: Context, engine: Engine, e: Event) {
+    /** Notification switches per part of the app (Settings > Notifications). Errors always notify. */
+    val CATS = linkedMapOf("signals" to "AI signals & auto trades", "manual" to "Manual orders (Trade tab)", "strats" to "Strategies",
+        "predict" to "Prediction · BTC 5m", "short" to "Short hunter", "pump" to "Pump hunter", "copy" to "Copy trade",
+        "course" to "Course / TA trades", "gold" to "Gold signal")
+    fun enabled(ctx: Context, cat: String): Boolean = ctx.getSharedPreferences("aidesk_notif", Context.MODE_PRIVATE).getBoolean(cat, true)
+    fun setEnabled(ctx: Context, cat: String, on: Boolean) = ctx.getSharedPreferences("aidesk_notif", Context.MODE_PRIVATE).edit().putBoolean(cat, on).apply()
+
+    fun infoCat(cat: String, ctx: Context, title: String, text: String, loud: Boolean = false) {
+        if (enabled(ctx, cat)) info(ctx, title, text, loud)
+    }
+
+    fun event(ctx: Context, engine: Engine, e: Event, cat: String = "other") {
+        if (cat != "other" && e.kind != "error" && !enabled(ctx, cat)) return
         val loud = e.loud && !quietNow(engine)
         val id = nextId++
         val sym = e.symbol
