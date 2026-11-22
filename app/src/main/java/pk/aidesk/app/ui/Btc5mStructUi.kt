@@ -118,6 +118,9 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
             bv?.rounds?.firstOrNull { it.T == c.roundStart }?.note?.takeIf { it.isNotBlank() }?.let {
                 T("This round: $it", 11.sp, if (already) C.Green else C.Amber)
             }
+            if (cfg.early) bv?.rounds?.firstOrNull { it.T == c.roundStart }?.diag?.takeIf { it.isNotBlank() }?.let {
+                T("Market: $it", 10.sp, if (it.contains("found")) C.Green else C.Amber)
+            }
             if (cfg.mode == "paper" || cfg.armed) {
                 if (!already && !cfg.auto) T("Auto is off: no bet this round.", 11.sp, C.Muted)
             } else {

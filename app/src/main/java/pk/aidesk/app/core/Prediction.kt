@@ -179,7 +179,8 @@ class PredictionApi(private val key: String, private val secret: String) {
     /** PredictAI parseAlignedBtc5mMarket: the BTCUSDT 5m Up/Down market whose window is [T, T+5m]; fail closed. */
     fun parseMarket(d: JSONObject, T: Long): Market? {
         val start = d.optLong("startDate"); val end = d.optLong("endDate")
-        if (d.optString("symbol") != "BTCUSDT" || d.optString("chartType") != "CRYPTO_UP_DOWN") return null
+        val sym = d.optString("symbol")
+        if ((sym.isNotEmpty() && sym != "BTCUSDT") || (sym.isEmpty() && !isBtc5m(d)) || d.optString("chartType") != "CRYPTO_UP_DOWN") return null
         if (end - start !in 240_000L..360_000L) return null
         if (abs(start - T) > 65_000L || abs(end - (T + 300_000L)) > 65_000L) return null
         val ms = d.optJSONArray("markets") ?: JSONArray()
@@ -208,29 +209,72 @@ class PredictionApi(private val key: String, private val secret: String) {
         return Market(d.optLong("marketTopicId"), d.optString("title"), start, end, d.optInt("slippageBps", 1200).coerceIn(1, 10_000), up, dn)
     }
 
-    fun market(T: Long): Market {
-        topicCache[T]?.let { topic ->
-            runCatching { parseMarket(get("/sapi/v1/w3w/wallet/prediction/market/detail", linkedMapOf("marketTopicId" to topic)), T) }.getOrNull()?.let { return it }
-            topicCache.remove(T)
-        }
-        val found = JSONArray(signed("GET", "/sapi/v1/w3w/wallet/prediction/market/search", linkedMapOf("query" to "BTC 5m up or down", "topK" to 50), true))
-        val cands = (0 until found.length()).mapNotNull { found.optJSONObject(it) }.filter { t ->
-            val s = t.optLong("startDate"); val e = t.optLong("endDate")
-            val text = (t.optString("slug") + " " + t.optString("title") + " " + t.optString("question")).lowercase()
-            !(s > 0L && abs(s - T) > 65_000L) && t.optString("symbol") == "BTCUSDT" && t.optString("chartType") == "CRYPTO_UP_DOWN" &&
-                (e - s in 240_000L..360_000L || Regex("\\b5\\s*(m|min|minute)").containsMatchIn(text))
-        }
-        for (t in cands.sortedBy { abs(it.optLong("startDate") - T) }.take(5)) {
-            val topic = t.optLong("marketTopicId")
-            parseMarket(get("/sapi/v1/w3w/wallet/prediction/market/detail", linkedMapOf("marketTopicId" to topic)), T)?.let {
-                if (topicCache.size > 64) topicCache.keys.filter { k -> k < T - 3_600_000L }.forEach { k -> topicCache.remove(k) }
-                topicCache[T] = topic
-                return it
-            }
-        }
-        throw UserError("No open Binance BTC 5m Up/Down market for this round yet.")
+    /** Why the last market() call found / did not find the round (shown in the app and the CSV). */
+    @Volatile var lastDiag: String = ""
+
+    private fun isBtc5m(t: JSONObject): Boolean {
+        val s = t.optLong("startDate"); val e = t.optLong("endDate")
+        val text = (t.optString("symbol") + " " + t.optString("slug") + " " + t.optString("title") + " " + t.optString("question")).lowercase()
+        return (t.optString("chartType").isEmpty() || t.optString("chartType") == "CRYPTO_UP_DOWN") &&
+            (text.contains("btc") || text.contains("bitcoin")) && (e - s in 240_000L..360_000L || Regex("\\b5\\s*(m|min|minute)").containsMatchIn(text))
     }
 
+    private fun detail(topic: Long) = get("/sapi/v1/w3w/wallet/prediction/market/detail", linkedMapOf("marketTopicId" to topic))
+
+    /** tradingStatus values of a detail, for the diagnosis */
+    private fun statuses(d: JSONObject): String {
+        val ms = d.optJSONArray("markets") ?: return "no markets"
+        return (0 until ms.length()).joinToString("/") { ms.getJSONObject(it).optString("tradingStatus", "?") }
+    }
+
+    /**
+     * The BTC 5m Up/Down market for the round starting at T, also BEFORE it starts. Routes, in order:
+     *  1. cached topic id;  2. market/list (crypto / up-down, newest first and soonest-ending first, 100 each), which lists
+     *     rounds created in advance;  3. the "timeline" of the round before (adjacent rounds are separate topics);
+     *  4. semantic search (only finds some rounds: the reason early buys failed before).
+     * Trading is allowed only when markets[].tradingStatus == OPEN (Binance docs); lastDiag says what was seen.
+     */
+    fun market(T: Long): Market {
+        val seen = ArrayList<String>()
+        fun tryTopic(topic: Long, via: String): Market? {
+            val d = runCatching { detail(topic) }.getOrElse { seen += "$via $topic: ${it.message}"; return null }
+            val m = parseMarket(d, T)
+            if (m == null) seen += "$via topic $topic start ${(d.optLong("startDate") - T) / 1000}s tradingStatus ${statuses(d)}"
+            else {
+                topicCache[T] = topic
+                if (topicCache.size > 64) topicCache.keys.filter { k -> k < T - 3_600_000L }.forEach { k -> topicCache.remove(k) }
+                lastDiag = "found via $via (topic $topic) at ${(nowMs() - T) / 1000}s"
+            }
+            return m
+        }
+        fun near(t: JSONObject) = isBtc5m(t) && abs(t.optLong("startDate") - T) <= 65_000L
+        topicCache[T]?.let { tryTopic(it, "cache")?.let { m -> return m }; topicCache.remove(T) }
+        // 2. category list, two sort orders
+        for ((sort, order) in listOf("CREATED_TIME" to "DESC", "END_DATE" to "ASC")) {
+            val o = runCatching { get("/sapi/v1/w3w/wallet/prediction/market/list", linkedMapOf("l1Category" to "crypto", "l2Category" to "up-down",
+                "sortBy" to sort, "orderBy" to order, "offset" to 0, "limit" to 100)) }.getOrElse { seen += "list $sort: ${it.message}"; null } ?: continue
+            val a = o.optJSONArray("marketTopics") ?: JSONArray()
+            val hits = (0 until a.length()).mapNotNull { a.optJSONObject(it) }.filter { near(it) }
+            if (hits.isEmpty()) seen += "list $sort: ${a.length()} topics, none for this round"
+            for (t in hits.sortedBy { abs(it.optLong("startDate") - T) }.take(3)) tryTopic(t.optLong("marketTopicId"), "list")?.let { return it }
+        }
+        // 3. timeline of the previous round
+        topicCache[T - 300_000L]?.let { prev ->
+            runCatching { detail(prev) }.getOrNull()?.optJSONArray("timeline")?.let { tl ->
+                for (i in 0 until tl.length()) tl.optJSONObject(i)?.let { x ->
+                    if (abs(x.optLong("startDate") - T) <= 65_000L) tryTopic(x.optLong("marketTopicId"), "timeline")?.let { return it }
+                }
+            }
+        }
+        // 4. search
+        val found = runCatching { JSONArray(signed("GET", "/sapi/v1/w3w/wallet/prediction/market/search",
+            linkedMapOf("query" to "BTC 5m up or down", "topK" to 50), true)) }.getOrElse { seen += "search: ${it.message}"; JSONArray() }
+        val cands = (0 until found.length()).mapNotNull { found.optJSONObject(it) }.filter { near(it) }
+        if (cands.isEmpty()) seen += "search: ${found.length()} topics, none for this round"
+        for (t in cands.sortedBy { abs(it.optLong("startDate") - T) }.take(5)) tryTopic(t.optLong("marketTopicId"), "search")?.let { return it }
+        lastDiag = "not found at ${(nowMs() - T) / 1000}s: " + seen.joinToString(" | ").take(400)
+        throw UserError("No open Binance BTC 5m Up/Down market for this round yet.")
+    }
     // ------------------------------------------------------------------ trading
     private fun wei(x: Double): String = BigDecimal.valueOf(x).multiply(BigDecimal.TEN.pow(18)).setScale(0, RoundingMode.DOWN).toBigIntegerExact().toString()
     private fun fromWei(q: JSONObject, n: String) = q.optString(n, "0").toBigDecimalOrNull()?.movePointLeft(18)?.toDouble() ?: 0.0

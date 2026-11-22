@@ -313,6 +313,15 @@ class TraderService : Service() {
                     val R = pk.aidesk.app.core.Btc5mStruct.ROUND
                     val ph = api.nowMs() % R
                     // early mode: the call for the NEXT round is made 10 s before it starts, from the still-forming candles
+                    val pred0 = engine.store.keys("prediction")?.let { (k, s) -> pk.aidesk.app.core.PredictionApi(k, s) }
+                    // early mode, 1 min before: find the next round's market now (list / timeline / search), so at -10 s only
+                    // the quote + order remain; the result is recorded (when it was listed, how it was found)
+                    if (cfg.early && ph in (R - 75_000L) until (R - 15_000L)) {
+                        if (pred0 != null) runCatching { book.prefetchMarket((api.nowMs() / R + 1) * R, pred0, api.nowMs()) }
+                        structTicks.value = System.currentTimeMillis()
+                        delay((R - api.nowMs() % R - 10_000L).coerceAtLeast(0L))
+                        continue
+                    }
                     val nextRound = if (cfg.early && ph >= R - 15_000L) (api.nowMs() / R + 1) * R else null
                     val call = if (cfg.early && nextRound == null) null
                                else pk.aidesk.app.core.Btc5mStruct.scan(api, m, cfg.thr, nextRound)
@@ -355,7 +364,7 @@ class TraderService : Service() {
                 val now = api.nowMs()
                 val R = pk.aidesk.app.core.Btc5mStruct.ROUND
                 val toBoundary = R - now % R
-                delay(if (book.cfg().early) (toBoundary - 10_000L).let { if (it < 1_000L) it + R else it } else toBoundary + 3_000L)
+                delay(if (book.cfg().early) (toBoundary - 60_000L).let { if (it < 1_000L) it + R else it } else toBoundary + 3_000L)
             }
             structWl?.let { if (it.isHeld) it.release() }
         }
