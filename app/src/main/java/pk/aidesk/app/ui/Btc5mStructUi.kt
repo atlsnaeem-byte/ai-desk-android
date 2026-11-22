@@ -81,7 +81,7 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
             T(mmss(left), 15.sp, if (left < 60_000) C.Amber else C.Txt, FontWeight.SemiBold, mono = true)
         }
         Gap(4.dp)
-        T("P(UP) ${String.format(US, "%.1f", c.pUp * 100)}% · ≥ 52% → UP, ≤ 48% → DOWN",
+        T("P(UP) ${String.format(US, "%.1f", c.pUp * 100)}% · " + (if (cfg.thrPct <= 50.0) "every round: ≥ 50% → UP, else DOWN" else "≥ 52% → UP, ≤ 48% → DOWN"),
             12.sp, C.Muted)
         T("Price to beat ${px(c.open)} → now ${px(c.price)} (${String.format(US, "%+.1f", c.moveBps)} bps)",
             12.sp, if (c.price >= c.open) C.Green else C.Red)
@@ -296,6 +296,12 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         Gap(8.dp)
         // ---- edge gate (PredictAI V7.3.0)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            T("Rule", 11.sp, C.Muted)
+            Pill("52% rule", C.Blue, filled = cfg.thrPct > 50.0) { vm.saveStructCfg(cfg.copy(thrPct = 52.0)) }
+            Pill("Every round", C.Blue, filled = cfg.thrPct <= 50.0) { vm.saveStructCfg(cfg.copy(thrPct = 50.0)) }
+        }
+        Gap(4.dp)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Call timing", 11.sp, C.Muted)
             Pill("At round start (0:03)", C.Blue, filled = !cfg.early) { vm.saveStructCfg(cfg.copy(early = false)) }
             Pill("10 s before start", C.Blue, filled = cfg.early) { vm.saveStructCfg(cfg.copy(early = true)) }
@@ -321,7 +327,7 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
                 vm.saveStructCfg(cfg.copy(windowSec = s))
             }
         }
-        T(if (cfg.minEdgePct <= -100.0) "Off: every call with P(UP) ≥ 52% or ≤ 48% is bet at the Binance quote, whatever the price. " +
+        T(if (cfg.minEdgePct <= -100.0) "Off: every call is bet at the Binance quote, whatever the price. " +
             "With the 2% fee this rule loses money if shares cost more than about 51¢."
           else "On: a call is bet only if backtest win rate × shares − cost ≥ ${cfg.minEdgePct.toInt()}% of cost at the real quote (2% fee included); " +
             (if (cfg.early) "re-checked every 1.5 s until the round starts." else "re-checked every 8 s until the window closes."), 10.sp, C.Dim)
@@ -337,12 +343,16 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         // ---- Prediction API key
         PredKeyBox(vm, bv.keyHint)
         Gap(8.dp)
-        T("Rule P(UP) ≥ 52% → UP, ≤ 48% → DOWN · backtest ${m?.testStart ?: ""} → ${m?.testEnd ?: ""} (${m?.days ?: 180} days, $1 per call, no fee)", 12.sp, C.Txt, FontWeight.Bold)
-        m?.bt(0.52)?.let { b ->
-            T("≈ ${b.perDay.toInt()} calls/day · won ${String.format(US, "%.1f", b.win * 100)}% · $1 each: " +
-                "${String.format(US, "%+.0f", b.pnl50)} USDT at 50¢, ${String.format(US, "%+.0f", b.pnl52)} at 52¢, ${String.format(US, "%+.0f", b.pnl55)} at 55¢ · max drop ${b.dd.toInt()}",
-                11.sp, C.Muted)
+        T("Backtest (1-second data, 23 Sep – 22 Nov 2026, $1 per bet, 2% fee: win +0.96 / loss −1)", 12.sp, C.Txt, FontWeight.Bold)
+        for ((lab, every, early, txt) in listOf(
+            listOf("52% rule · 10 s before", false, true, "153/day · won 52.9% · +$348 · +$5.70/day · worst day −$29 · max drop $34"),
+            listOf("52% rule · at start", false, false, "154/day · won 52.8% · +$317 · +$5.20/day · worst day −$24 · max drop $29"),
+            listOf("Every round · 10 s before", true, true, "283/day · won 52.0% · +$340 · +$5.58/day · worst day −$37 · max drop $49"),
+            listOf("Every round · at start", true, false, "283/day · won 51.8% · +$278 · +$4.55/day · worst day −$45 · max drop $57"))) {
+            val on = (cfg.thrPct <= 50.0) == every && cfg.early == early
+            T("${if (on) "▶ " else "   "}$lab: $txt", 11.sp, if (on) C.Txt else C.Muted, if (on) FontWeight.Bold else FontWeight.Normal)
         }
+        T("Break-even win rate is 51% at a 50¢ share. Every round has a thinner margin: 1¢ more per share removes most of its profit.", 10.sp, C.Dim)
         Gap(10.dp)
         val us = US
         @Composable fun stat(label: String, s: Btc5mStructBook.Stats) {
