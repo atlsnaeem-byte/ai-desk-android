@@ -320,12 +320,15 @@ class TraderService : Service() {
                     val pred = engine.store.keys("prediction")?.let { (k, s) -> pk.aidesk.app.core.PredictionApi(k, s) }
                     if (isNew && call != null) {
                         // same decision path for PAPER and LIVE: quote -> EV gate -> risk -> execute; re-quote every 8 s in the window
-                        var step = book.tryEnter(call, cfg, pred, api.nowMs())
+                        // a network error inside an attempt must not drop the round: it is retried like a failed quote
+                        fun attempt(c2: pk.aidesk.app.core.Btc5mStructBook.Cfg) = try { book.tryEnter(call, c2, pred, api.nowMs()) }
+                            catch (e: Exception) { pk.aidesk.app.core.Btc5mStructBook.Step(false, "error: ${(e as? BinanceException)?.msg ?: e.message}") }
+                        var step = attempt(cfg)
                         // early: retry only until the round starts; at round start: until the entry window closes
                         while (!step.done && (if (cfg.early) api.nowMs() < call.roundStart else api.nowMs() - call.roundStart < cfg.windowSec * 1000L)) {
                             book.setStatus(step.text); structTicks.value = System.currentTimeMillis()
                             delay(if (cfg.early) 1_500L else 8_000L)
-                            step = book.tryEnter(call, book.cfg(), pred, api.nowMs())
+                            step = attempt(book.cfg())
                         }
                         book.setStatus("${hhmmUtc(call.roundStart)} ${call.side} · ${step.text}")
                         if (cfg.alerts && (step.placed || cfg.mode == "live"))
@@ -333,8 +336,14 @@ class TraderService : Service() {
                                 (if (step.placed) " · ${cfg.mode.uppercase()} BET" else " · skipped"), step.text, loud = cfg.mode == "live" && step.placed)
                     }
                     // LIVE: claim winnings of ended rounds once per round (PredictAI 5m maintenance)
+                    // settle the round that just ended as soon as its last 1m bar is final (round end + 6 s), not 5 min later
+                    run {
+                        val R0 = pk.aidesk.app.core.Btc5mStruct.ROUND
+                        val wait = (api.nowMs() / R0) * R0 + 6_000L - api.nowMs()
+                        if (wait in 1..60_000) { structTicks.value = System.currentTimeMillis(); delay(wait) }
+                    }
+                    runCatching { book.settle(api) }
                     if (cfg.mode == "live" && pred != null) runCatching { pred.claimAll(pred.wallet()) }
-                    book.settle(api)
                     structTicks.value = System.currentTimeMillis()
                     lastErr = null
                 } catch (e: Exception) {

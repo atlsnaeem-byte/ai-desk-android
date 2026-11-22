@@ -243,7 +243,7 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
     val ticks by TraderService.structTicks.collectAsState()
     val running by TraderService.running.collectAsState()
     LaunchedEffect(ticks) { vm.loadStructBook() }
-    LaunchedEffect(Unit) { while (true) { delay(20_000); vm.loadStructBook() } }
+    LaunchedEffect(Unit) { while (true) { delay(3_000); vm.loadStructBook() } }
     var showAll by remember { mutableStateOf(false) }
     var edit by remember { mutableStateOf<Pair<String, String>?>(null) }
     val bv = v ?: run { Card { T("Loading record…", 12.sp, C.Muted) }; return }
@@ -376,15 +376,27 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
                 T("Bets", 12.sp, C.Txt, FontWeight.Bold, modifier = Modifier.weight(1f))
                 if (bv.bets.size > 10) T(if (showAll) "Less" else "All ${bv.bets.size}", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { showAll = !showAll })
             }
-            for (b in bets) Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                T(hhmm(b.T), 11.sp, C.Muted, mono = true); HGap(6.dp)
-                T(b.mode.uppercase(), 10.sp, if (b.mode == "live") C.Green else C.Blue, FontWeight.Bold); HGap(6.dp)
-                T("${b.side} @${String.format(us, "%.1f", b.share * 100)}¢ · ${f2(b.stake)}" + (if (b.status != "OK") " · ${b.status}" else ""),
-                    11.sp, if (b.status != "OK") C.Amber else sideCol(b.side), mono = true, modifier = Modifier.weight(1f))
-                val p = b.pnl
-                T(p?.let { String.format(us, "%+.2f", it) } ?: "open", 11.sp, when { p == null -> C.Muted; p >= 0 -> C.Green; else -> C.Red }, mono = true)
-                HGap(8.dp)
-                T("✕", 11.sp, C.Dim, modifier = Modifier.clickable { vm.deleteStructBet(b.id) })
+            val nowMs = System.currentTimeMillis()
+            for (b in bets) Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    T("${hhmm(b.T)}–${hhmm(b.T + Btc5mStruct.ROUND)}", 11.sp, C.Txt, mono = true); HGap(6.dp)
+                    T(b.mode.uppercase(), 10.sp, if (b.mode == "live") C.Green else C.Blue, FontWeight.Bold); HGap(6.dp)
+                    T("${b.side} @${String.format(us, "%.1f", b.share * 100)}¢ · ${f2(b.stake)}" + (if (b.status != "OK") " · ${b.status}" else ""),
+                        11.sp, if (b.status != "OK") C.Amber else sideCol(b.side), mono = true, modifier = Modifier.weight(1f))
+                    val p = b.pnl
+                    T(when { p != null -> String.format(us, "%+.2f", p); b.up == null && nowMs < b.T + Btc5mStruct.ROUND -> "OPEN"; else -> "settling…" },
+                        11.sp, when { p == null -> C.Amber; p >= 0 -> C.Green; else -> C.Red }, FontWeight.Bold, mono = true)
+                    HGap(8.dp)
+                    T("✕", 11.sp, C.Dim, modifier = Modifier.clickable { vm.deleteStructBet(b.id) })
+                }
+                val placed = java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss").withZone(pk.aidesk.app.core.Engine.PKT)
+                    .format(java.time.Instant.ofEpochMilli(b.id))
+                T("bet placed $placed · " + when {
+                    b.pnl != null -> "${if (b.up == 2) "TIE" else if (b.win == true) "WIN" else "LOSS"} · settled"
+                    nowMs < b.T -> "round starts in ${mmss(b.T - nowMs)}"
+                    nowMs < b.T + Btc5mStruct.ROUND -> "result in ${mmss(b.T + Btc5mStruct.ROUND - nowMs)}"
+                    else -> "round ended, result in a few seconds"
+                }, 10.sp, C.Muted)
             }
             Gap(6.dp)
         }
