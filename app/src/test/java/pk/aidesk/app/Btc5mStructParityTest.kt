@@ -15,9 +15,23 @@ class Btc5mStructParityTest {
     private fun l(o: JSONObject, x: String) = o.getJSONArray(x).let { a -> LongArray(a.length()) { a.getLong(it) } }
 
     @Test
-    fun structMatchesPython() {
-        val m = Btc5mStruct.load(res("btc5m_struct.json"))
-        val cases = JSONArray(res("btc5m_struct_fixture.json"))
+    fun structMatchesPython() = check("btc5m_struct.json", "btc5m_struct_fixture.json", Btc5mStruct.BTC5)
+
+    /** ETH 5m, BTC 15m, ETH 15m (export_multi.py) */
+    @Test
+    fun otherMarketsMatchPython() {
+        for (id in listOf("eth5", "btc15", "eth15")) {
+            val mk = Btc5mStruct.mk(id)
+            assertTrue(id, mk.id == id)
+            val m = Btc5mStruct.load(res(mk.asset))
+            assertTrue("$id atr_tf", m.atrTf == mk.tf)
+            check(mk.asset, "pred_${id}_fixture.json", mk)
+        }
+    }
+
+    private fun check(modelRes: String, fixtureRes: String, mk: Btc5mStruct.Mk) {
+        val m = Btc5mStruct.load(res(modelRes))
+        val cases = JSONArray(res(fixtureRes))
         val bad = mutableListOf<String>()
         for (k in 0 until cases.length()) {
             val cs = cases.getJSONObject(k)
@@ -48,9 +62,10 @@ class Btc5mStructParityTest {
             val out = cs.getJSONObject("out")
             val got = mapOf("up" to m.pUp(x), "y_close" to m.yClose.raw(x), "y_high" to m.yHigh.raw(x), "y_low" to m.yLow.raw(x))
             for ((n, v) in got) if (abs(v - out.getDouble(n)) > 1e-6) bad += "case $k $n: $v vs ${out.getDouble(n)}"
-            val call = Btc5mStruct.evaluate(m, tf, T + 3_000, tf.getValue("m1").c.last(), flow = flow)
+            val call = Btc5mStruct.evaluate(m, tf, T + 3_000, tf.getValue("m1").c.last(), flow = flow, mk = mk)
             if (abs(call.pUp - out.getDouble("up")) > 1e-9) bad += "case $k evaluate p: ${call.pUp}"
+            if (call.roundStart != T) bad += "case $k round start ${call.roundStart} vs $T"
         }
-        assertTrue(bad.take(30).joinToString("\n"), bad.isEmpty())
+        assertTrue("${mk.id}: " + bad.take(30).joinToString("\n"), bad.isEmpty())
     }
 }

@@ -291,8 +291,8 @@ fun PredictionScreen(vm: AppVM, act: MainActivity) {
         TopBar(vm, "Prediction")
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
             item {
-                T("BTC Up / Down 5m · structure AI + order flow", 14.sp, C.Txt, FontWeight.Bold)
-                T("Structure AI (HH/HL/LH/LL on 1m + 5m + 15m), one call at each round start", 11.sp, C.Muted)
+                PredictMarketPicker(vm)
+                T("Structure AI (HH/HL/LH/LL on 1m + 5m + 15m) + order flow, one call at each round start", 11.sp, C.Muted)
                 Gap(6.dp)
                 StructCallCard(vm, act, now)
                 Gap(8.dp)

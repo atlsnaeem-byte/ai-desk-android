@@ -289,28 +289,36 @@ class TraderService : Service() {
     }
 
     // ------------------------------------------------------------------ BTC 5m structure AI (one call at every round start)
-    private var structJob: Job? = null
-    private var structWl: PowerManager.WakeLock? = null
+    private val structJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+    private val structWls = java.util.concurrent.ConcurrentHashMap<String, PowerManager.WakeLock>()
 
     /** While auto is on: 3 s after every 5-minute boundary, read HH/HL/LH/LL on 1m/5m/15m, make the round's call, auto paper
      *  bet it (PAPER mode), alert, and settle finished rounds. LIVE mode alerts only: Binance Prediction has no order API. */
+    /** one loop per Predict market (BTC 5m, ETH 5m, BTC 15m, ETH 15m) whose Auto is on */
     fun ensureStructLoop() {
-        if (structJob?.isActive == true) return
-        structJob = scope.launch {
-            val book = pk.aidesk.app.core.Btc5mStructBook(engine.store)
+        for (mk in pk.aidesk.app.core.Btc5mStruct.MARKETS) {
+            if (structJobs[mk.id]?.isActive == true) continue
+            if (!pk.aidesk.app.core.Btc5mStructBook(engine.store, mk).cfg().auto) continue
+            structJobs[mk.id] = structLoop(mk)
+        }
+    }
+
+    private fun structLoop(mk: pk.aidesk.app.core.Btc5mStruct.Mk): Job {
+        return scope.launch {
+            val book = pk.aidesk.app.core.Btc5mStructBook(engine.store, mk)
             val api = Binance()
             var synced = 0L
             var lastErr: String? = null
             while (isActive) {
                 val cfg = book.cfg()
                 if (!cfg.auto) break
-                val wl = structWl ?: (getSystemService(POWER_SERVICE) as PowerManager)
-                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aidesk:btc5ms").apply { setReferenceCounted(false) }.also { structWl = it }
-                wl.acquire(7 * 60_000L)
+                val wl = structWls.getOrPut(mk.id) { (getSystemService(POWER_SERVICE) as PowerManager)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aidesk:pred_${mk.id}").apply { setReferenceCounted(false) } }
+                wl.acquire(mk.round + 2 * 60_000L)
                 try {
                     if (System.currentTimeMillis() - synced > 600_000) { api.syncTime(); synced = System.currentTimeMillis() }
-                    val m = pk.aidesk.app.core.Btc5mStruct.model(this@TraderService)
-                    val R = pk.aidesk.app.core.Btc5mStruct.ROUND
+                    val m = pk.aidesk.app.core.Btc5mStruct.model(this@TraderService, mk)
+                    val R = mk.round
                     val ph = api.nowMs() % R
                     // early mode: the call for the NEXT round is made 10 s before it starts, from the still-forming candles
                     val pred0 = engine.store.keys("prediction")?.let { (k, s) -> pk.aidesk.app.core.PredictionApi(k, s) }
@@ -325,7 +333,7 @@ class TraderService : Service() {
                     }
                     val nextRound = if (cfg.early && ph >= R - lead - 5_000L) (api.nowMs() / R + 1) * R else null
                     val call = if (cfg.early && nextRound == null) null
-                               else pk.aidesk.app.core.Btc5mStruct.scan(api, m, cfg.thr, nextRound)
+                               else pk.aidesk.app.core.Btc5mStruct.scan(api, m, cfg.thr, nextRound, mk)
                     val isNew = call != null && book.recordRound(call)
                     val pred = engine.store.keys("prediction")?.let { (k, s) -> pk.aidesk.app.core.PredictionApi(k, s) }
                     if (isNew && call != null) {
@@ -342,13 +350,13 @@ class TraderService : Service() {
                         }
                         book.setStatus("${hhmmUtc(call.roundStart)} ${call.side} · ${step.text}")
                         if (cfg.alerts && (step.placed || cfg.mode == "live"))
-                            Notifier.infoCat("predict", this@TraderService, "BTC 5m ${call.side} · win rate ${(call.winP * 100).toInt()}%" +
+                            Notifier.infoCat("predict", this@TraderService, "${mk.label} ${call.side} · win rate ${(call.winP * 100).toInt()}%" +
                                 (if (step.placed) " · ${cfg.mode.uppercase()} BET" else " · skipped"), step.text, loud = cfg.mode == "live" && step.placed)
                     }
                     // LIVE: claim winnings of ended rounds once per round (PredictAI 5m maintenance)
                     // settle the round that just ended as soon as its last 1m bar is final (round end + 6 s), not 5 min later
                     run {
-                        val R0 = pk.aidesk.app.core.Btc5mStruct.ROUND
+                        val R0 = mk.round
                         val wait = (api.nowMs() / R0) * R0 + 6_000L - api.nowMs()
                         if (wait in 1..60_000) { structTicks.value = System.currentTimeMillis(); delay(wait) }
                     }
@@ -358,16 +366,16 @@ class TraderService : Service() {
                     lastErr = null
                 } catch (e: Exception) {
                     val msg = (e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName
-                    if (msg != lastErr) engine.store.log("ERROR", "BTC 5m structure: $msg")
+                    if (msg != lastErr) engine.store.log("ERROR", "${mk.label} predict: $msg")
                     lastErr = msg
                     delay(if (cfg.early) 3_000L else 15_000L); continue         // retry within the same round
                 }
                 val now = api.nowMs()
-                val R = pk.aidesk.app.core.Btc5mStruct.ROUND
+                val R = mk.round
                 val toBoundary = R - now % R
                 delay(if (book.cfg().early) (toBoundary - 60_000L).let { if (it < 1_000L) it + R else it } else toBoundary + 3_000L)
             }
-            structWl?.let { if (it.isHeld) it.release() }
+            structWls[mk.id]?.let { if (it.isHeld) it.release() }
         }
     }
 

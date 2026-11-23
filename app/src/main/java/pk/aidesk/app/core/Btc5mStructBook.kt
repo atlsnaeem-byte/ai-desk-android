@@ -17,7 +17,7 @@ import org.json.JSONObject
  * Settlement: Binance spot 1m bars (proxy for the market's Chainlink price): UP if close > open, DOWN if close < open,
  * a tie pays 0.5 per share.
  */
-class Btc5mStructBook(private val store: Store) {
+class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mStruct.BTC5) {
     data class Cfg(
         val auto: Boolean = true,          // background loop: call + auto bet every round
         val mode: String = "paper",        // paper | live
@@ -80,9 +80,10 @@ class Btc5mStructBook(private val store: Store) {
         val rate get() = if (n > 0) wins.toDouble() / n else 0.0
     }
 
-    private val CFG = "btc5ms_cfg.json"; private val ROUNDS = "btc5ms_rounds.json"; private val BETS = "btc5ms_bets.json"
-    private val STATUS = "btc5ms_status.json"
-    fun cfg() = Cfg.of(store.readObj(CFG))
+    private val CFG = "${mk.prefix}_cfg.json"; private val ROUNDS = "${mk.prefix}_rounds.json"; private val BETS = "${mk.prefix}_bets.json"
+    private val STATUS = "${mk.prefix}_status.json"
+    /** a market never set up starts with auto OFF (only BTC 5m keeps its old default: on) */
+    fun cfg() = store.readObj(CFG)?.let { Cfg.of(it) } ?: Cfg(auto = mk.id == Btc5mStruct.BTC5.id)
     fun saveCfg(c: Cfg) = store.writeObj(CFG, c.json())
 
     fun status(): Pair<Long, String> = store.readObj(STATUS)?.let { it.optLong("t") to it.optString("s") } ?: (0L to "")
@@ -134,7 +135,7 @@ class Btc5mStructBook(private val store: Store) {
 
     /** Look the market up early (1 min before): records when it was first listed + how. No quote, no bet. */
     fun prefetchMarket(T: Long, api: PredictionApi, now: Long) {
-        val m = try { api.market(T) } catch (e: Exception) { noteDiagAny(T, api.lastDiag.ifBlank { e.message ?: "error" }); return }
+        val m = try { api.market(T, mk) } catch (e: Exception) { noteDiagAny(T, api.lastDiag.ifBlank { e.message ?: "error" }); return }
         noteDiagAny(T, api.lastDiag)
         synchronized(this) {
             val l = raw(ROUNDS).toMutableList()
@@ -177,7 +178,7 @@ class Btc5mStructBook(private val store: Store) {
     }
 
     // ------------------------------------------------------------------ LIVE per-round mark (S1)
-    private fun markKey() = "btc5ms_mark.json"
+    private fun markKey() = "${mk.prefix}_mark.json"
     @Synchronized fun marked(T: Long) = store.readObj(markKey())?.optLong("T") == T
     @Synchronized fun mark(T: Long) = store.writeObj(markKey(), JSONObject().put("T", T))
     @Synchronized fun unmark(T: Long) { if (marked(T)) store.writeObj(markKey(), JSONObject()) }
@@ -185,15 +186,15 @@ class Btc5mStructBook(private val store: Store) {
     // ------------------------------------------------------------------ settlement
     fun settle(api: Binance, now: Long = api.nowMs()) {
         val pending = (raw(ROUNDS).filter { !it.has("up") }.map { it.getLong("T") } + raw(BETS).filter { !it.has("up") }.map { it.getLong("T") })
-            .filter { it + Btc5mStruct.ROUND + 5_000 <= now }.toSortedSet()
+            .filter { it + mk.round + 5_000 <= now }.toSortedSet()
         if (pending.isEmpty()) return
         val res = HashMap<Long, Int>()
         for (T in pending.toList().takeLast(200)) {
-            val a = api.request("GET", "/api/v3/klines", mapOf("symbol" to Btc5m.SYMBOL, "interval" to "1m", "startTime" to T, "limit" to 5),
+            val a = api.request("GET", "/api/v3/klines", mapOf("symbol" to mk.symbol, "interval" to "1m", "startTime" to T, "limit" to mk.roundMin),
                 host = Binance.SPOT) as JSONArray
-            if (a.length() < 5 || a.getJSONArray(0).getLong(0) != T) continue
+            if (a.length() < mk.roundMin || a.getJSONArray(0).getLong(0) != T) continue
             val open = a.getJSONArray(0).getString(1).toDouble()
-            val close = a.getJSONArray(4).getString(4).toDouble()
+            val close = a.getJSONArray(mk.roundMin - 1).getString(4).toDouble()
             res[T] = if (close > open) 1 else if (close < open) 0 else 2
         }
         synchronized(this) {
@@ -216,7 +217,7 @@ class Btc5mStructBook(private val store: Store) {
             val done = b.filter { it.pnl != null }.sortedBy { it.T }
             val tail = done.takeLastWhile { (it.pnl ?: 0.0) < 0 }
             if (tail.size >= cfg.lossStreak) {
-                val until = tail.last().T + Btc5mStruct.ROUND + cfg.pauseMin * 60_000L
+                val until = tail.last().T + mk.round + cfg.pauseMin * 60_000L
                 if (now < until) return "${tail.size} losses in a row: paused for ${(until - now) / 60_000 + 1} min"
             }
         }
@@ -262,7 +263,7 @@ class Btc5mStructBook(private val store: Store) {
                 val bal = api.balances()
                 plan = api.funding(bal, runCatching { api.walletBalance(wallet) }.getOrNull(), cfg.stake)
                 if (plan == null && mode == "live") return skip("not enough Prediction balance for ${cfg.stake} USDT")
-                market = try { api.market(T) } catch (e: UserError) {
+                market = try { api.market(T, mk) } catch (e: UserError) {
                     if (cfg.early) { noteDiag(T, api.lastDiag); return Step(false, "next round market not listed yet (${(now - T) / 1000}s)") } else throw e
                 }
                 noteDiag(T, api.lastDiag)
@@ -298,11 +299,11 @@ class Btc5mStructBook(private val store: Store) {
 
         // LIVE: mark first (S1), then order once
         val quote = q ?: return Step(false, "no quote")
-        val w = wallet!!; val pl = plan!!; val mk = market!!
+        val w = wallet!!; val pl = plan!!; val mkt = market!!
         if (marked(T)) return Step(true, "round already traded")
         mark(T)
         return try {
-            val id = api!!.placeOrder(w, quote, pl.accountType, minOf(mk.slippageBps, 200), pl.source)
+            val id = api!!.placeOrder(w, quote, pl.accountType, minOf(mkt.slippageBps, 200), pl.source)
             addBet("live", T, c.side, price * 100, cost, auto = true, orderId = id, winP = p)
             noteRound(T, "LIVE ${c.side} at ${(now - T) / 1000}s · order $id · ${String.format(us, "%.1f", price * 100)}¢ · edge ${String.format(us, "%+.1f", edge)}%", price, edge)
             Step(true, "LIVE ${c.side} ${String.format(us, "%.2f", cost)} USDT at ${String.format(us, "%.1f", price * 100)}¢ · order $id", placed = true)

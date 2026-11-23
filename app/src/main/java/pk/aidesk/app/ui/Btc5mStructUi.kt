@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -55,6 +57,41 @@ import kotlin.math.min
 private val US = Locale.US
 private fun sideCol(side: String) = when (side) { "UP" -> C.Green; "DOWN" -> C.Red; else -> C.Muted }
 
+/** Market dropdown at the top of the Prediction tab. Backtest notes: 56% rule, 180-day walk-forward, P&L at 54c (2026-11-23). */
+private val MK_NOTE = mapOf(
+    "btc5" to "56% rule: 55.8% won · +122 at 54¢ · 7/7 months up",
+    "eth5" to "56% rule: 56.1% won · +210 at 54¢ · 7/7 months up (best)",
+    "btc15" to "WEAK · 56% rule: 54.5% won · −77 at 54¢ (needs ≤ 53¢)",
+    "eth15" to "WEAK · 56% rule: 54.5% won · −72 at 54¢ (needs ≤ 53¢)",
+)
+
+@Composable
+fun PredictMarketPicker(vm: AppVM) {
+    val mk by vm.structMk.collectAsState()
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(C.Panel2).clickable { open = true }.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                T("${mk.label} Up / Down ▾", 15.sp, C.Txt, FontWeight.Bold)
+                T(MK_NOTE[mk.id] ?: "", 11.sp, if (mk.weak) C.Amber else C.Green)
+            }
+        }
+        DropdownMenu(open, { open = false }) {
+            for (m in Btc5mStruct.MARKETS) DropdownMenuItem(
+                text = {
+                    Column {
+                        T((if (m == mk) "▶ " else "") + "${m.label} Up / Down", 13.sp, C.Txt, FontWeight.Bold)
+                        T(MK_NOTE[m.id] ?: "", 10.sp, if (m.weak) C.Amber else C.Green)
+                    }
+                },
+                onClick = { open = false; vm.selectStructMk(m.id) })
+        }
+    }
+    T("Each market has its own Auto switch, settings and record; Auto runs in the background for every market switched on. " +
+        "BNB and the 1h / 1d rounds tested with no edge, so they are not offered.", 10.sp, C.Dim)
+}
+
 /** Live 5m chart + the structure AI's call for the current round (refreshes every 3 s while shown). */
 @Composable
 fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
@@ -64,13 +101,14 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
     LaunchedEffect(Unit) { while (true) { vm.loadStruct(); delay(3_000) } }
     LaunchedEffect(Unit) { while (true) { vm.loadStructPx(); delay(1_000) } }
     val livePx by vm.structPx.collectAsState()
-    val c = call
-    val cfg = bv?.cfg ?: Btc5mStructBook.Cfg()
+    val c0mk by vm.structMk.collectAsState()
+    val c = call?.takeIf { it.mk == c0mk }
+    val cfg = bv?.takeIf { it.mk == c0mk }?.cfg ?: Btc5mStructBook.Cfg()
     Card(border = if (c != null && c.side != "NONE") sideCol(c.side) else C.Border) {
-        if (c == null) { T(err?.let { "BTC data error: $it" } ?: "Loading BTC 1m / 5m / 15m…", 12.sp, if (err != null) C.Amber else C.Muted); return@Card }
-        val left = c.roundStart + Btc5mStruct.ROUND - now
+        if (c == null) { T(err?.let { "${c0mk.coin} data error: $it" } ?: "Loading ${c0mk.coin} 1m / 5m / 15m…", 12.sp, if (err != null) C.Amber else C.Muted); return@Card }
+        val left = c.roundStart + c.roundMs - now
         Row(verticalAlignment = Alignment.CenterVertically) {
-            T("${hhmm(c.roundStart)}–${hhmm(c.roundStart + Btc5mStruct.ROUND)}", 15.sp, C.Txt, FontWeight.Bold, mono = true)
+            T("${c.mk.label} · ${hhmm(c.roundStart)}–${hhmm(c.roundStart + c.roundMs)}", 15.sp, C.Txt, FontWeight.Bold, mono = true)
             HGap(8.dp)
             when (c.side) {
                 "UP" -> Pill("CALL UP", C.Green, filled = true)
@@ -106,7 +144,7 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
             T("Next round ${hhmm(n.roundStart)} (call ${cfg.leadSec} s before start): ${if (n.side == "NONE") "NO CALL" else n.side} · P(UP) ${String.format(US, "%.1f", n.pUp * 100)}% · " +
                 "starts in ${mmss(n.roundStart - now)}", 12.sp, sideCol(n.side), FontWeight.Bold)
         }
-        T("Projected 5m candle: close ${px(c.projClose)} · high ${px(c.projHigh)} · low ${px(c.projLow)}", 12.sp, C.Txt)
+        T("Projected ${c.mk.roundMin}m candle: close ${px(c.projClose)} · high ${px(c.projHigh)} · low ${px(c.projLow)}", 12.sp, C.Txt)
         // betting
         if (c.side != "NONE") {
             Gap(6.dp)
@@ -135,7 +173,7 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
                     Column(Modifier.weight(1f)) {
                         Btn("Open Binance", C.Amber, outline = true, height = 36.dp) {
                             runCatching { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
-                                android.net.Uri.parse("https://www.binance.com/en/prediction/market-detail/btc-up-or-down-5m"))) }
+                                android.net.Uri.parse(c.mk.webUrl))) }
                         }
                         Gap(4.dp)
                         Btn(if (already) "Recorded" else "I bet ${f2(cfg.stake)} USDT", C.Green, enabled = !already && cents != null, height = 36.dp) {
@@ -164,8 +202,8 @@ private fun StructChart(c: Btc5mStruct.Call, livePx: Double?) {
     Canvas(Modifier.fillMaxWidth().height(260.dp).clip(RoundedCornerShape(10.dp)).background(C.Bg)) { drawStruct(c, form, px) }
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         T("━ beat ${px(c.open)}", 10.sp, C.Amber)
-        T("▮ live 5m candle", 10.sp, C.Muted)
-        T("▮ AI projected 5m: ${if (c.projClose >= c.open) "UP" else "DOWN"} ${px(c.projClose)}", 10.sp, if (c.projClose >= c.open) C.Green else C.Red)
+        T("▮ live ${c.mk.roundMin}m candle", 10.sp, C.Muted)
+        T("▮ AI projected ${c.mk.roundMin}m: ${if (c.projClose >= c.open) "UP" else "DOWN"} ${px(c.projClose)}", 10.sp, if (c.projClose >= c.open) C.Green else C.Red)
     }
 }
 
@@ -198,7 +236,7 @@ private fun DrawScope.drawStruct(c: Btc5mStruct.Call, form: DoubleArray?, livePx
         drawLine(C.Border.copy(alpha = 0.45f), Offset(0f, y(v)), Offset(W, y(v)), 1f)
         text(px(v), W + 4.dp.toPx(), y(v) + 3.dp.toPx(), C.Dim)
     }
-    for (i in start until n) if ((b.t[i] / 300_000L) % 6 == 0L) text(hhmm(b.t[i]), x(i), size.height - 3.dp.toPx(), C.Dim, center = true)
+    for (i in start until n) if ((b.t[i] / (b.tfMin * 60_000L)) % 6 == 0L) text(hhmm(b.t[i]), x(i), size.height - 3.dp.toPx(), C.Dim, center = true)
     val bw = max(2f, step * 0.62f)
     fun candle(xc: Float, o: Double, h: Double, l: Double, cl: Double, alpha: Float) {
         val col = (if (cl >= o) C.Green else C.Red).copy(alpha = alpha)
@@ -209,7 +247,7 @@ private fun DrawScope.drawStruct(c: Btc5mStruct.Call, form: DoubleArray?, livePx
     for (i in start until n) candle(x(i), b.o[i], b.h[i], b.l[i], b.c[i], 1f)
     if (f != null) candle(x(n), f[0], f[1], f[2], f[3], 1f)
     // swings with HH / HL / LH / LL labels (5m)
-    for (s in c.tf.getValue("m5").swings) {
+    for (s in c.tf.getValue(c.mk.tf).swings) {
         if (s.i < start) continue
         val col = when (s.label) { "HH", "HL" -> C.Green; "LH", "LL" -> C.Red; else -> C.Muted }
         val yy = y(s.price)
@@ -249,13 +287,15 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
     LaunchedEffect(Unit) { while (true) { delay(3_000); vm.loadStructBook() } }
     var showAll by remember { mutableStateOf(false) }
     var edit by remember { mutableStateOf<Pair<String, String>?>(null) }
-    val bv = v ?: run { Card { T("Loading record…", 12.sp, C.Muted) }; return }
+    val selMk by vm.structMk.collectAsState()
+    val bv = v?.takeIf { it.mk == selMk } ?: run { Card { T("Loading record…", 12.sp, C.Muted) }; return }
+    val rm = bv.mk.round
     val cfg = bv.cfg
     val m = vm.structModel
     Card {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                T("Auto (every round)", 14.sp, C.Txt, FontWeight.Bold)
+                T("Auto · ${bv.mk.label} (every round)", 14.sp, C.Txt, FontWeight.Bold)
                 T(when {
                     !cfg.auto -> "OFF: no calls are recorded and no bets are placed."
                     !running -> "Needs the scanner running: tap the red bar on the Signals tab."
@@ -274,7 +314,7 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
             T("Mode", 12.sp, C.Muted)
             Pill("PAPER", C.Blue, filled = cfg.mode == "paper") { vm.saveStructCfg(cfg.copy(mode = "paper", armed = false)) }
             Pill("LIVE", C.Green, filled = cfg.mode == "live") {
-                if (cfg.mode != "live") act.confirmUser("Switch BTC 5m structure AI to LIVE (still needs ARM LIVE to place orders)") { vm.saveStructCfg(cfg.copy(mode = "live")) }
+                if (cfg.mode != "live") act.confirmUser("Switch ${bv.mk.label} predict to LIVE (still needs ARM LIVE to place orders)") { vm.saveStructCfg(cfg.copy(mode = "live")) }
             }
             Box(Modifier.weight(1f))
             Pill(if (cfg.alerts) "Alerts on" else "Alerts off", if (cfg.alerts) C.Green else C.Muted) { vm.saveStructCfg(cfg.copy(alerts = !cfg.alerts)) }
@@ -323,7 +363,7 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
             for (e in listOf(0.0, 2.0, 5.0)) Pill("${e.toInt()}%", C.Blue, filled = cfg.minEdgePct == e) { vm.saveStructCfg(cfg.copy(minEdgePct = e, minP = 0.0)) }
         }
         Gap(4.dp)
-        if (cfg.early) T("Buys at ${cfg.leadSec} s before the round starts (e.g. 12:54:${60 - cfg.leadSec} for the 12:55 round). If the buy can't be made " +
+        if (cfg.early) T("Buys at ${cfg.leadSec} s before the round starts (e.g. 12:${if (bv.mk.roundMin == 15) "59" else "54"}:${60 - cfg.leadSec} for the ${if (bv.mk.roundMin == 15) "13:00" else "12:55"} round). If the buy can't be made " +
             "before the start, that round is skipped: no buying after the start.", 11.sp, C.Muted)
         else Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Entry window", 11.sp, C.Muted)
@@ -347,7 +387,7 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         // ---- Prediction API key
         PredKeyBox(vm, bv.keyHint)
         Gap(8.dp)
-        T("Backtest · structure AI + order flow (${m?.testStart ?: ""} → ${m?.testEnd ?: ""}, ${m?.days ?: 180} days walk-forward, \$1 per bet, 2% fee)", 12.sp, C.Txt, FontWeight.Bold)
+        T("Backtest · ${bv.mk.label} · structure AI + order flow (${m?.testStart ?: ""} → ${m?.testEnd ?: ""}, ${m?.days ?: 180} days walk-forward, \$1 per bet, 2% fee)", 12.sp, C.Txt, FontWeight.Bold)
         for (b in (m?.backtest ?: emptyList()).sortedByDescending { it.thr }) {
             val on = kotlin.math.abs(cfg.thrPct / 100 - b.thr) < 1e-6
             val lab = if (b.thr <= 0.5) "Every round" else "${(b.thr * 100).toInt()}% rule"
@@ -383,12 +423,12 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
             val nowMs = System.currentTimeMillis()
             for (b in bets) Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    T("${hhmm(b.T)}–${hhmm(b.T + Btc5mStruct.ROUND)}", 11.sp, C.Txt, mono = true); HGap(6.dp)
+                    T("${hhmm(b.T)}–${hhmm(b.T + rm)}", 11.sp, C.Txt, mono = true); HGap(6.dp)
                     T(b.mode.uppercase(), 10.sp, if (b.mode == "live") C.Green else C.Blue, FontWeight.Bold); HGap(6.dp)
                     T("${b.side} @${String.format(us, "%.1f", b.share * 100)}¢ · ${f2(b.stake)}" + (if (b.status != "OK") " · ${b.status}" else ""),
                         11.sp, if (b.status != "OK") C.Amber else sideCol(b.side), mono = true, modifier = Modifier.weight(1f))
                     val p = b.pnl
-                    T(when { p != null -> String.format(us, "%+.2f", p); b.up == null && nowMs < b.T + Btc5mStruct.ROUND -> "OPEN"; else -> "settling…" },
+                    T(when { p != null -> String.format(us, "%+.2f", p); b.up == null && nowMs < b.T + rm -> "OPEN"; else -> "settling…" },
                         11.sp, when { p == null -> C.Amber; p >= 0 -> C.Green; else -> C.Red }, FontWeight.Bold, mono = true)
                     HGap(8.dp)
                     T("✕", 11.sp, C.Dim, modifier = Modifier.clickable { vm.deleteStructBet(b.id) })
@@ -398,7 +438,7 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
                 T("bet placed $placed · " + when {
                     b.pnl != null -> "${if (b.up == 2) "TIE" else if (b.win == true) "WIN" else "LOSS"} · settled"
                     nowMs < b.T -> "round starts in ${mmss(b.T - nowMs)}"
-                    nowMs < b.T + Btc5mStruct.ROUND -> "result in ${mmss(b.T + Btc5mStruct.ROUND - nowMs)}"
+                    nowMs < b.T + rm -> "result in ${mmss(b.T + rm - nowMs)}"
                     else -> "round ended, result in a few seconds"
                 }, 10.sp, C.Muted)
             }
@@ -406,8 +446,8 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             T("Export CSV", 12.sp, C.Blue, FontWeight.SemiBold, modifier = Modifier.clickable { act.exportCsv("btc5ms") })
-            T("Clear paper", 12.sp, C.Amber, FontWeight.SemiBold, modifier = Modifier.clickable { act.confirmUser("Delete all structure paper bets") { vm.clearStruct("paper") } })
-            T("Clear rounds", 12.sp, C.Amber, FontWeight.SemiBold, modifier = Modifier.clickable { act.confirmUser("Delete all recorded structure rounds") { vm.clearStruct("rounds") } })
+            T("Clear paper", 12.sp, C.Amber, FontWeight.SemiBold, modifier = Modifier.clickable { act.confirmUser("Delete all ${bv.mk.label} paper bets") { vm.clearStruct("paper") } })
+            T("Clear rounds", 12.sp, C.Amber, FontWeight.SemiBold, modifier = Modifier.clickable { act.confirmUser("Delete all recorded ${bv.mk.label} rounds") { vm.clearStruct("rounds") } })
         }
     }
     edit?.let { (what, init) ->

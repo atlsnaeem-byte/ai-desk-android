@@ -462,33 +462,44 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     fun clearBtc(what: String) = viewModelScope.launch { withContext(Dispatchers.IO) { btcBook.clear(what) }; loadBtcBook() }
 
     // BTC 5m structure AI (HH/HL/LH/LL on 1m/5m/15m -> one call at each round start) + its paper / live record
+    /** Predict tab market (dropdown): BTC 5m / ETH 5m / BTC 15m / ETH 15m. Each has its own model, settings and record. */
+    val structMk = MutableStateFlow(pk.aidesk.app.core.Btc5mStruct.mk(
+        getApplication<Application>().getSharedPreferences("aidesk_ui", android.content.Context.MODE_PRIVATE).getString("pred_market", null)))
+    fun selectStructMk(id: String) {
+        val mk = pk.aidesk.app.core.Btc5mStruct.mk(id)
+        if (mk == structMk.value) return
+        getApplication<Application>().getSharedPreferences("aidesk_ui", android.content.Context.MODE_PRIVATE).edit().putString("pred_market", mk.id).apply()
+        structMk.value = mk
+        structCall.value = null; structNext.value = null; structErr.value = null; structPx.value = null; structView.value = null
+        loadStruct(); loadStructBook()
+    }
     val structCall = MutableStateFlow<pk.aidesk.app.core.Btc5mStruct.Call?>(null)
     val structNext = MutableStateFlow<pk.aidesk.app.core.Btc5mStruct.Call?>(null)
     val structErr = MutableStateFlow<String?>(null)
-    var structModel: pk.aidesk.app.core.Btc5mStruct.Model? = null
-        private set
+    val structModel: pk.aidesk.app.core.Btc5mStruct.Model?
+        get() = pk.aidesk.app.core.Btc5mStruct.cachedModel(structMk.value)     // loaded off the main thread by loadStruct()
     private var s5Busy = false
     private var structSynced = 0L
     fun loadStruct() {
         if (s5Busy) return
         s5Busy = true
+        val mk = structMk.value
         viewModelScope.launch {
             try {
-                structCall.value = withContext(Dispatchers.IO) {
-                    val m = structModel ?: pk.aidesk.app.core.Btc5mStruct.load(
-                        getApplication<Application>().assets.open("btc5m_struct.json").bufferedReader().use { it.readText() }).also { structModel = it }
+                val (cur, next) = withContext(Dispatchers.IO) {
+                    val m = pk.aidesk.app.core.Btc5mStruct.model(getApplication<Application>(), mk)
                     if (System.currentTimeMillis() - structSynced > 600_000) { pub.syncTime(); structSynced = System.currentTimeMillis() }
-                    val cfg = structBook.cfg()
-                    val R = pk.aidesk.app.core.Btc5mStruct.ROUND
+                    val cfg = book(mk).cfg()
+                    val R = mk.round
                     val now = pub.nowMs()
                     // early mode: in the last 30 s also show the call for the next round, as it stands now
-                    structNext.value = if (cfg.early && now % R >= R - maxOf(30_000L, cfg.leadSec * 1000L + 5_000L))
-                        runCatching { pk.aidesk.app.core.Btc5mStruct.scan(pub, m, cfg.thr, (now / R + 1) * R) }.getOrNull() else null
-                    pk.aidesk.app.core.Btc5mStruct.scan(pub, m, cfg.thr)
+                    val nx = if (cfg.early && now % R >= R - maxOf(30_000L, cfg.leadSec * 1000L + 5_000L))
+                        runCatching { pk.aidesk.app.core.Btc5mStruct.scan(pub, m, cfg.thr, (now / R + 1) * R, mk) }.getOrNull() else null
+                    pk.aidesk.app.core.Btc5mStruct.scan(pub, m, cfg.thr, null, mk) to nx
                 }
-                structErr.value = null
+                if (mk == structMk.value) { structCall.value = cur; structNext.value = next; structErr.value = null }
             } catch (e: Exception) {
-                structErr.value = e.message ?: e.javaClass.simpleName
+                if (mk == structMk.value) structErr.value = e.message ?: e.javaClass.simpleName
             } finally {
                 s5Busy = false
             }
@@ -500,32 +511,39 @@ class AppVM(app: Application) : AndroidViewModel(app) {
     fun loadStructPx() {
         if (pxBusy) return
         pxBusy = true
+        val mk = structMk.value
         viewModelScope.launch {
             try {
-                structPx.value = withContext(Dispatchers.IO) {
-                    (pub.request("GET", "/api/v3/ticker/price", mapOf("symbol" to "BTCUSDT"), host = pk.aidesk.app.core.Binance.SPOT) as org.json.JSONObject)
+                val p = withContext(Dispatchers.IO) {
+                    (pub.request("GET", "/api/v3/ticker/price", mapOf("symbol" to mk.symbol), host = pk.aidesk.app.core.Binance.SPOT) as org.json.JSONObject)
                         .getString("price").toDouble()
                 }
+                if (mk == structMk.value) structPx.value = p
             } catch (_: Exception) {
             } finally { pxBusy = false }
         }
     }
-    val structBook by lazy { pk.aidesk.app.core.Btc5mStructBook(store) }
+    private val structBooks = java.util.concurrent.ConcurrentHashMap<String, pk.aidesk.app.core.Btc5mStructBook>()
+    fun book(mk: pk.aidesk.app.core.Btc5mStruct.Mk) = structBooks.getOrPut(mk.id) { pk.aidesk.app.core.Btc5mStructBook(store, mk) }
+    val structBook get() = book(structMk.value)
     class StructView(val cfg: pk.aidesk.app.core.Btc5mStructBook.Cfg, val bets: List<pk.aidesk.app.core.Btc5mStructBook.Bet>,
                      val rounds: List<pk.aidesk.app.core.Btc5mStructBook.RoundRow>,
                      val paper: pk.aidesk.app.core.Btc5mStructBook.Stats, val paperToday: pk.aidesk.app.core.Btc5mStructBook.Stats,
                      val live: pk.aidesk.app.core.Btc5mStructBook.Stats, val calls: Pair<Int, Int>,
                      val liveToday: pk.aidesk.app.core.Btc5mStructBook.Stats, val status: Pair<Long, String>, val keyHint: String?,
-                     val risk: String?, val market: Triple<Int, Int, Double?>)
+                     val risk: String?, val market: Triple<Int, Int, Double?>,
+                     val mk: pk.aidesk.app.core.Btc5mStruct.Mk = pk.aidesk.app.core.Btc5mStruct.BTC5)
     val structView = MutableStateFlow<StructView?>(null)
     fun loadStructBook() = viewModelScope.launch {
-        structView.value = withContext(Dispatchers.IO) {
-            val b = structBook
+        val mk = structMk.value
+        val v = withContext(Dispatchers.IO) {
+            val b = book(mk)
             val day = System.currentTimeMillis().let { it - (it + 5 * 3_600_000L) % 86_400_000L }     // midnight PKT
             val cfg = b.cfg()
             StructView(cfg, b.bets().reversed(), b.rounds().reversed(), b.stats("paper"), b.stats("paper", day), b.stats("live"), b.callStats(),
-                b.stats("live", day), b.status(), store.keyHint("prediction"), b.riskBlock(cfg, cfg.mode, System.currentTimeMillis()), b.marketStats())
+                b.stats("live", day), b.status(), store.keyHint("prediction"), b.riskBlock(cfg, cfg.mode, System.currentTimeMillis()), b.marketStats(), mk)
         }
+        if (mk == structMk.value) structView.value = v
     }
     /** Binance Prediction API (separate key: Reading + Prediction Trading, withdrawals off). */
     val predInfo = MutableStateFlow<String?>(null)
@@ -558,7 +576,7 @@ class AppVM(app: Application) : AndroidViewModel(app) {
         loadStruct()
     }
     fun addStructBet(mode: String, call: pk.aidesk.app.core.Btc5mStruct.Call, cents: Double?, stake: Double) = viewModelScope.launch {
-        withContext(Dispatchers.IO) { structBook.addBet(mode, call.roundStart, call.side, cents, stake) }
+        withContext(Dispatchers.IO) { book(call.mk).addBet(mode, call.roundStart, call.side, cents, stake) }
         toast.value = "${if (mode == "live") "Live" else "Paper"} bet recorded: ${call.side} ${cents?.let { "at ${it.toInt()}¢" } ?: "at the paper price"}, $stake USDT"
         loadStructBook()
     }
@@ -815,7 +833,7 @@ class AppVM(app: Application) : AndroidViewModel(app) {
                 out.write(byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()))
                 out.write(text.toByteArray(Charsets.UTF_8))
             } ?: throw pk.aidesk.app.core.UserError("Could not open the file for writing.")
-            "Exported $n ${when (kind) { "signals" -> "signal results"; "btc5m" -> "BTC 5m calls and bets"; "btc5ms" -> "BTC 5m structure rounds and bets"; else -> "trades" }}. Open it in Excel, or send it to the laptop for the AI to learn from."
+            "Exported $n ${when (kind) { "signals" -> "signal results"; "btc5m" -> "BTC 5m calls and bets"; "btc5ms" -> "${structMk.value.label} predict rounds and bets"; else -> "trades" }}. Open it in Excel, or send it to the laptop for the AI to learn from."
         }
     }
 
