@@ -37,13 +37,30 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         val pauseMin: Int = 60,
         val early: Boolean = true,         // call BEFORE the round starts (from the still-forming candles)
         val leadSec: Int = 30,             // ... this many seconds before (10 or 30)
+        val hoursMask: Int = ALL_HOURS,    // hour clusters (PKT) to bet in: bits 0-5 = weekday 4h blocks 00-04..20-24, bits 6-11 = weekend
     ) {
         val thr get() = thrPct / 100
+        /** Is the round starting at T inside the selected hour clusters? (PKT: Mon-Fri = weekday, Sat-Sun = weekend) */
+        fun inHours(T: Long) = hoursMask and (1 shl bit(T)) != 0
+        val allHours get() = hoursMask and ALL_HOURS == ALL_HOURS
         fun json() = JSONObject().put("v", 4).put("auto", auto).put("mode", mode).put("stake", stake).put("thrPct", thrPct)
             .put("paperCents", paperCents).put("alerts", alerts).put("minP", minP).put("minEdgePct", minEdgePct)
             .put("windowSec", windowSec).put("useQuotes", useQuotes).put("armed", armed).put("killSwitch", killSwitch)
-            .put("dailyLossUsdt", dailyLossUsdt).put("maxTradesDay", maxTradesDay).put("lossStreak", lossStreak).put("pauseMin", pauseMin).put("early", early).put("leadSec", leadSec)
+            .put("dailyLossUsdt", dailyLossUsdt).put("maxTradesDay", maxTradesDay).put("lossStreak", lossStreak).put("pauseMin", pauseMin).put("early", early).put("leadSec", leadSec).put("hoursMask", hoursMask)
         companion object {
+            const val ALL_HOURS = 0xFFF
+            /** 180-day BTC 5m scan: weekday 08-12 and 20-24 PKT were weakest on BTC and ETH in both halves */
+            const val SKIP_WEAK = 0xFDB        // all bits except weekday 08-12 (bit 2) and 20-24 (bit 5)
+            /** only 00-04 on weekdays, all day on weekends */
+            const val NIGHT_WEEKEND = 0xFC1    // bit 0 + bits 6-11
+            val BLOCKS = listOf("00-04", "04-08", "08-12", "12-16", "16-20", "20-24")
+            /** bit index of the round start T: 4h block in PKT, +6 on Sat/Sun */
+            fun bit(T: Long): Int {
+                val z = java.time.Instant.ofEpochMilli(T).atZone(java.time.ZoneOffset.ofHours(5))
+                val wk = z.dayOfWeek == java.time.DayOfWeek.SATURDAY || z.dayOfWeek == java.time.DayOfWeek.SUNDAY
+                return z.hour / 4 + if (wk) 6 else 0
+            }
+            fun label(T: Long) = (if (bit(T) >= 6) "weekend " else "weekday ") + BLOCKS[bit(T) % 6] + " PKT"
             fun of(o: JSONObject?): Cfg {
                 if (o == null) return Cfg()
                 val d = Cfg()
@@ -51,7 +68,7 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
                     o.optDouble("paperCents", d.paperCents), o.optBoolean("alerts", d.alerts), o.optDouble("minP", d.minP),
                     o.optDouble("minEdgePct", d.minEdgePct), o.optInt("windowSec", d.windowSec), o.optBoolean("useQuotes", d.useQuotes),
                     o.optBoolean("armed", d.armed), o.optBoolean("killSwitch", d.killSwitch), o.optDouble("dailyLossUsdt", d.dailyLossUsdt),
-                    o.optInt("maxTradesDay", d.maxTradesDay), o.optInt("lossStreak", d.lossStreak), o.optInt("pauseMin", d.pauseMin), o.optBoolean("early", d.early), o.optInt("leadSec", 10))
+                    o.optInt("maxTradesDay", d.maxTradesDay), o.optInt("lossStreak", d.lossStreak), o.optInt("pauseMin", d.pauseMin), o.optBoolean("early", d.early), o.optInt("leadSec", 10), o.optInt("hoursMask", ALL_HOURS))
                 // v2 (2026-11-22): one rule only, P(UP) >= 52% -> UP, <= 48% -> DOWN, every call bet; edge gate off
                 // v3 (2026-11-22): exactly the 1-second backtest that made +$322 in 60 days: 52% rule, call + buy 10 s before the
                 // round start, every call bet ($1, no price check), no daily / streak / trade-count limits, no kill switch
@@ -225,7 +242,8 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
     }
 
     // ------------------------------------------------------------------ the shared entry path
-    class Step(val done: Boolean, val text: String, val placed: Boolean = false)
+    /** quiet = skipped on purpose (outside the selected hours): no alert */
+    class Step(val done: Boolean, val text: String, val placed: Boolean = false, val quiet: Boolean = false)
 
     /**
      * One attempt to enter the round of call c. done = stop trying this round. Blocking network calls.
@@ -240,6 +258,7 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         }
         if (c.side == "NONE") return Step(true, "no call this round")
         if (hasBet(T, mode) || (mode == "live" && marked(T))) return Step(true, "round already traded")
+        if (!cfg.inHours(T)) { noteRound(T, "outside selected hours (${Cfg.label(T)}): not bet"); return Step(true, "outside selected hours (${Cfg.label(T)})", quiet = true) }
         // early mode: buy only BEFORE the round starts (the call was made from the candles at T-10 s); no entry window
         if (cfg.early && now >= T) return skip("round started before an early buy was possible: skipped")
         if (!cfg.early && (now - T) / 1000 > cfg.windowSec) return skip("entry window (${cfg.windowSec}s) passed")

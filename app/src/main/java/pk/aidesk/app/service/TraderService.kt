@@ -349,7 +349,7 @@ class TraderService : Service() {
                             step = attempt(book.cfg())
                         }
                         book.setStatus("${hhmmUtc(call.roundStart)} ${call.side} · ${step.text}")
-                        if (cfg.alerts && (step.placed || cfg.mode == "live"))
+                        if (cfg.alerts && !step.quiet && (step.placed || cfg.mode == "live"))
                             Notifier.infoCat("predict", this@TraderService, "${mk.label} ${call.side} · win rate ${(call.winP * 100).toInt()}%" +
                                 (if (step.placed) " · ${cfg.mode.uppercase()} BET" else " · skipped"), step.text, loud = cfg.mode == "live" && step.placed)
                     }

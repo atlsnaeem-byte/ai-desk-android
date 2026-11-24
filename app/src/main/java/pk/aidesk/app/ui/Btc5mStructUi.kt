@@ -340,9 +340,11 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         // ---- edge gate (PredictAI V7.3.0)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Rule", 11.sp, C.Muted)
-            for ((lab, thr) in listOf("52%" to 52.0, "54%" to 54.0, "56%" to 56.0, "Every round" to 50.0))
+            for ((lab, thr) in listOf("52%" to 52.0, "54%" to 54.0, "56%" to 56.0, "60%" to 60.0, "Every" to 50.0))
                 Pill(lab, C.Blue, filled = cfg.thrPct == thr) { vm.saveStructCfg(cfg.copy(thrPct = thr)) }
         }
+        Gap(6.dp)
+        HourClusters(cfg) { vm.saveStructCfg(cfg.copy(hoursMask = it)) }
         Gap(4.dp)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Call timing", 11.sp, C.Muted)
@@ -473,6 +475,39 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
             })
     }
+}
+
+/** Hour clusters (PKT, 4-hour blocks, weekdays and weekend separately): rounds outside are recorded but not bet. */
+@Composable
+private fun HourClusters(cfg: Btc5mStructBook.Cfg, save: (Int) -> Unit) {
+    val M = Btc5mStructBook.Cfg
+    val mask = cfg.hoursMask
+    T("Hour clusters (Pakistan time)", 12.sp, C.Txt, FontWeight.Bold)
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        T("Preset", 11.sp, C.Muted)
+        Pill("All hours", C.Blue, filled = mask == M.ALL_HOURS) { save(M.ALL_HOURS) }
+        Pill("Skip weak", C.Blue, filled = mask == M.SKIP_WEAK) { save(M.SKIP_WEAK) }
+        Pill("Night + weekend", C.Blue, filled = mask == M.NIGHT_WEEKEND) { save(M.NIGHT_WEEKEND) }
+    }
+    for ((lab, off) in listOf("Mon–Fri" to 0, "Sat–Sun" to 6)) {
+        Gap(4.dp)
+        T(lab, 11.sp, C.Muted)
+        for (half in listOf(0, 3)) Row(Modifier.padding(top = 2.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            for (i in half until half + 3) {
+                val bit = 1 shl (off + i)
+                val on = mask and bit != 0
+                Pill(M.BLOCKS[i], if (on) C.Green else C.Muted, filled = on) { save(mask xor bit) }
+            }
+        }
+    }
+    val nowOn = cfg.inHours(System.currentTimeMillis())
+    T(when {
+        mask == 0 -> "No cluster selected: nothing will be bet."
+        cfg.allHours -> "Bets in every hour."
+        else -> "Now ${M.label(System.currentTimeMillis())}: ${if (nowOn) "ON, bets allowed" else "OFF, calls are recorded but not bet"}."
+    }, 11.sp, if (mask == 0 || !nowOn) C.Amber else C.Green)
+    T("BTC 5m backtest, 180 days, 60% rule, \$1 per bet: all hours 15/day, 59.1%, +\$91 at 56¢ · skip weak (weekday 08–12 + 20–24) " +
+        "12/day, 60.2%, +\$114 · night + weekend 7/day, 60.8%, +\$85. Single 4-hour blocks are noisy (±3–6 pts), so prefer the presets.", 10.sp, C.Dim)
 }
 
 /** Binance Prediction API key (separate from the futures key): Reading + Prediction Trading, withdrawals OFF. */
