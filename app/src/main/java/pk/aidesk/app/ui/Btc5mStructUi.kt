@@ -340,7 +340,7 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         // ---- edge gate (PredictAI V7.3.0)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Rule", 11.sp, C.Muted)
-            for ((lab, thr) in listOf("52%" to 52.0, "54%" to 54.0, "56%" to 56.0, "60%" to 60.0, "Every" to 50.0))
+            for ((lab, thr) in listOf("56%" to 56.0, "60%" to 60.0, "65%" to 65.0, "Every" to 50.0))
                 Pill(lab, C.Blue, filled = cfg.thrPct == thr) { vm.saveStructCfg(cfg.copy(thrPct = thr)) }
         }
         Gap(6.dp)
@@ -374,7 +374,7 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
             }
         }
         T(if (cfg.minEdgePct <= -100.0) "Off: every call is bet at the Binance quote, whatever the price. " +
-            "With the 2% fee this rule loses money if shares cost more than about 51¢."
+            "It loses money whenever the share costs more than the win rate (2% fee included)."
           else "On: a call is bet only if backtest win rate × shares − cost ≥ ${cfg.minEdgePct.toInt()}% of cost at the real quote (2% fee included); " +
             (if (cfg.early) "re-checked every 1.5 s until the round starts." else "re-checked every 8 s until the window closes."), 10.sp, C.Dim)
         Gap(8.dp)
@@ -394,11 +394,13 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
             val on = kotlin.math.abs(cfg.thrPct / 100 - b.thr) < 1e-6
             val lab = if (b.thr <= 0.5) "Every round" else "${(b.thr * 100).toInt()}% rule"
             T("${if (on) "▶ " else "   "}$lab: ${b.perDay.toInt()}/day · won ${String.format(US, "%.1f", b.win * 100)}% · " +
-                "at 50¢ ${String.format(US, "%+.0f", b.pnl50)} · at 54¢ ${if (b.pnl54.isNaN()) "-" else String.format(US, "%+.0f", b.pnl54)} · max drop ${b.dd.toInt()}",
+                "at ${m!!.btPx[0]}¢ ${String.format(US, "%+.0f", b.pnl50)} · at ${m.btPx[2]}¢ ${if (b.pnl54.isNaN()) "-" else String.format(US, "%+.0f", b.pnl54)} · max drop ${b.dd.toInt()}",
                 11.sp, if (on) C.Txt else C.Muted, if (on) FontWeight.Bold else FontWeight.Normal)
         }
-        T("You pay about 54¢ per share with the fee on real Binance quotes, so the \"at 54¢\" column is the realistic one. " +
-            "Calling 10 or 30 s before the start tested as accurate as at the start (1-second data, 60 days).", 10.sp, C.Dim)
+        T(if (m?.gap == true) "Since 7 Aug 2026 the rounds settle on the TWAP rule: Up if the average price of the last 60 s >= the average of the 60 s " +
+            "before the start. This model is trained on that rule and scored on the REAL market results. At the start the likely side " +
+            "already costs ~62-70¢ (it was ~66¢ for 60% calls on 12-23 Nov), so keep the price check on." else
+            "You pay about 54¢ per share with the fee on real Binance quotes, so the \"at 54¢\" column is the realistic one.", 10.sp, C.Dim)
         Gap(10.dp)
         val us = US
         @Composable fun stat(label: String, s: Btc5mStructBook.Stats) {
@@ -506,8 +508,7 @@ private fun HourClusters(cfg: Btc5mStructBook.Cfg, save: (Int) -> Unit) {
         cfg.allHours -> "Bets in every hour."
         else -> "Now ${M.label(System.currentTimeMillis())}: ${if (nowOn) "ON, bets allowed" else "OFF, calls are recorded but not bet"}."
     }, 11.sp, if (mask == 0 || !nowOn) C.Amber else C.Green)
-    T("BTC 5m backtest, 180 days, 60% rule, \$1 per bet: all hours 15/day, 59.1%, +\$91 at 56¢ · skip weak (weekday 08–12 + 20–24) " +
-        "12/day, 60.2%, +\$114 · night + weekend 7/day, 60.8%, +\$85. Single 4-hour blocks are noisy (±3–6 pts), so prefer the presets.", 10.sp, C.Dim)
+    T("Hour clusters were picked on the old model (2026-11-24); re-check them on the TWAP model before relying on them.", 10.sp, C.Dim)
 }
 
 /** Binance Prediction API key (separate from the futures key): Reading + Prediction Trading, withdrawals OFF. */

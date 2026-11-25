@@ -22,12 +22,12 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         val auto: Boolean = true,          // background loop: call + auto bet every round
         val mode: String = "paper",        // paper | live
         val stake: Double = 1.0,           // USDT per bet (LIVE minimum 1.5)
-        val thrPct: Double = 56.0,         // call when P(UP) >= 52% -> UP, <= 48% -> DOWN
+        val thrPct: Double = 60.0,         // call when P(UP) >= 60% -> UP, <= 40% -> DOWN
         val paperCents: Double = 50.0,     // paper fill price when no Binance quote is available
         val alerts: Boolean = true,
         val minP: Double = 0.0,            // min backtest win rate of the called side (0 = off)
-        val minEdgePct: Double = -100.0,   // min EV / cost after the fee (-100 = off)
-        val windowSec: Int = 45,           // enter only in the first N seconds of the round
+        val minEdgePct: Double = 3.0,      // min EV / cost after the fee (-100 = off)
+        val windowSec: Int = 20,           // enter only in the first N seconds of the round
         val useQuotes: Boolean = true,     // PAPER uses real Binance quotes when an API key is saved
         val armed: Boolean = false,        // LIVE orders allowed
         val killSwitch: Boolean = false,
@@ -35,7 +35,7 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         val maxTradesDay: Int = 0,         // 0 = off
         val lossStreak: Int = 0,           // pause after N losses in a row, 0 = off
         val pauseMin: Int = 60,
-        val early: Boolean = true,         // call BEFORE the round starts (from the still-forming candles)
+        val early: Boolean = false,        // call BEFORE the round starts (from the still-forming candles)
         val leadSec: Int = 30,             // ... this many seconds before (10 or 30)
         val hoursMask: Int = ALL_HOURS,    // hour clusters (PKT) to bet in: bits 0-5 = weekday 4h blocks 00-04..20-24, bits 6-11 = weekend
     ) {
@@ -43,7 +43,7 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         /** Is the round starting at T inside the selected hour clusters? (PKT: Mon-Fri = weekday, Sat-Sun = weekend) */
         fun inHours(T: Long) = hoursMask and (1 shl bit(T)) != 0
         val allHours get() = hoursMask and ALL_HOURS == ALL_HOURS
-        fun json() = JSONObject().put("v", 4).put("auto", auto).put("mode", mode).put("stake", stake).put("thrPct", thrPct)
+        fun json() = JSONObject().put("v", 5).put("auto", auto).put("mode", mode).put("stake", stake).put("thrPct", thrPct)
             .put("paperCents", paperCents).put("alerts", alerts).put("minP", minP).put("minEdgePct", minEdgePct)
             .put("windowSec", windowSec).put("useQuotes", useQuotes).put("armed", armed).put("killSwitch", killSwitch)
             .put("dailyLossUsdt", dailyLossUsdt).put("maxTradesDay", maxTradesDay).put("lossStreak", lossStreak).put("pauseMin", pauseMin).put("early", early).put("leadSec", leadSec).put("hoursMask", hoursMask)
@@ -73,9 +73,13 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
                 // v3 (2026-11-22): exactly the 1-second backtest that made +$322 in 60 days: 52% rule, call + buy 10 s before the
                 // round start, every call bet ($1, no price check), no daily / streak / trade-count limits, no kill switch
                 return if (o.optInt("v", 1) < 3) c.copy(minP = 0.0, minEdgePct = -100.0, early = true, stake = if (c.mode == "live") maxOf(c.stake, 1.5) else 1.0,
-                    paperCents = 50.0, dailyLossUsdt = 0.0, maxTradesDay = 0, lossStreak = 0, killSwitch = false, thrPct = 56.0, leadSec = 30)
+                    paperCents = 50.0, dailyLossUsdt = 0.0, maxTradesDay = 0, lossStreak = 0, killSwitch = false, thrPct = 60.0, leadSec = 30).copy(early = false, windowSec = 20, minEdgePct = 3.0, useQuotes = true)
                     // v4 (2026-11-23): order-flow model; 56% rule (the only one profitable at the ~54c real price), call 30 s before
-                    else if (o.optInt("v", 1) < 4) c.copy(killSwitch = false, thrPct = 56.0, early = true, leadSec = 30) else c.copy(killSwitch = false)
+                    else if (o.optInt("v", 1) < 4) c.copy(killSwitch = false, thrPct = 60.0, early = false, windowSec = 20, minEdgePct = 3.0, minP = 0.0, useQuotes = true)
+                    // v5 (2026-11-25): TWAP model. The price to beat is the 60 s average BEFORE the start, so the call is made AT the
+                    // start (bar ending at T closed); 60% rule; bet only if the calibrated win rate beats the real quote by >= 3%
+                    else if (o.optInt("v", 1) < 5) c.copy(killSwitch = false, thrPct = 60.0, early = false, windowSec = 20, minEdgePct = 3.0, minP = 0.0, useQuotes = true)
+                    else c.copy(killSwitch = false)
             }
         }
     }
@@ -201,24 +205,61 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
     @Synchronized fun unmark(T: Long) { if (marked(T)) store.writeObj(markKey(), JSONObject()) }
 
     // ------------------------------------------------------------------ settlement
+    /**
+     * Settlement (2026-11-25): the REAL market result first (Polymarket event "<coin>-updown-<n>m-<start s>", public, no key);
+     * if it is not out yet 3 min after the round end, the rule computed from Binance spot 1m bars:
+     *  - rounds since 2026-08-07: TWAP rule, avg (h+l+c)/3 of the round's last minute >= that of the minute before the start
+     *    (matches the real result ~94% of rounds)
+     *  - older rounds: end close >= start open
+     * Polymarket Up wins ties (">="), so there is no tie any more.
+     */
     fun settle(api: Binance, now: Long = api.nowMs()) {
         val pending = (raw(ROUNDS).filter { !it.has("up") }.map { it.getLong("T") } + raw(BETS).filter { !it.has("up") }.map { it.getLong("T") })
             .filter { it + mk.round + 5_000 <= now }.toSortedSet()
         if (pending.isEmpty()) return
-        val res = HashMap<Long, Int>()
+        val res = HashMap<Long, Int>(); val src = HashMap<Long, String>()
         for (T in pending.toList().takeLast(200)) {
-            val a = api.request("GET", "/api/v3/klines", mapOf("symbol" to mk.symbol, "interval" to "1m", "startTime" to T, "limit" to mk.roundMin),
-                host = Binance.SPOT) as JSONArray
-            if (a.length() < mk.roundMin || a.getJSONArray(0).getLong(0) != T) continue
-            val open = a.getJSONArray(0).getString(1).toDouble()
-            val close = a.getJSONArray(mk.roundMin - 1).getString(4).toDouble()
-            res[T] = if (close > open) 1 else if (close < open) 0 else 2
+            realResult(T)?.let { res[T] = it; src[T] = "market"; continue }
+            if (now < T + mk.round + 180_000) continue           // give the market 3 min to publish its result
+            val twap = T >= Btc5mStruct.TWAP_FROM
+            val a = api.request("GET", "/api/v3/klines", mapOf("symbol" to mk.symbol, "interval" to "1m",
+                "startTime" to (if (twap) T - Btc5mStruct.MIN else T), "limit" to mk.roundMin + (if (twap) 1 else 0)), host = Binance.SPOT) as JSONArray
+            val n = mk.roundMin + (if (twap) 1 else 0)
+            if (a.length() < n) continue
+            fun px(i: Int, k: Int) = a.getJSONArray(i).getString(k).toDouble()
+            if (twap) {
+                if (a.getJSONArray(0).getLong(0) != T - Btc5mStruct.MIN) continue
+                val start = (px(0, 2) + px(0, 3) + px(0, 4)) / 3; val end = (px(n - 1, 2) + px(n - 1, 3) + px(n - 1, 4)) / 3
+                res[T] = if (end >= start) 1 else 0
+            } else {
+                if (a.getJSONArray(0).getLong(0) != T) continue
+                res[T] = if (px(n - 1, 4) >= px(0, 1)) 1 else 0
+            }
+            src[T] = if (twap) "binance TWAP calc" else "binance close"
         }
         synchronized(this) {
-            saveRounds(raw(ROUNDS).onEach { o -> if (!o.has("up")) res[o.getLong("T")]?.let { o.put("up", it) } })
-            saveBets(raw(BETS).onEach { o -> if (!o.has("up")) res[o.getLong("T")]?.let { o.put("up", it) } })
+            saveRounds(raw(ROUNDS).onEach { o -> if (!o.has("up")) res[o.getLong("T")]?.let { o.put("up", it); o.put("src", src[o.getLong("T")]) } })
+            saveBets(raw(BETS).onEach { o -> if (!o.has("up")) res[o.getLong("T")]?.let { o.put("up", it); o.put("src", src[o.getLong("T")]) } })
         }
     }
+
+    /** Real result of the round from Polymarket's public API: 1 = Up, 0 = Down, null = not settled yet / not found. */
+    private fun realResult(T: Long): Int? = try {
+        val slug = "${mk.coin.lowercase()}-updown-${mk.roundMin}m-${T / 1000}"
+        val c = java.net.URL("https://gamma-api.polymarket.com/events?slug=$slug").openConnection() as java.net.HttpURLConnection
+        c.connectTimeout = 8_000; c.readTimeout = 8_000; c.setRequestProperty("User-Agent", "Mozilla/5.0")
+        val body = c.inputStream.bufferedReader().use { it.readText() }
+        val ev = JSONArray(body)
+        if (ev.length() == 0) null else {
+            val m = ev.getJSONObject(0).getJSONArray("markets").getJSONObject(0)
+            val outs = JSONArray(m.optString("outcomes", "[]")); val prices = JSONArray(m.optString("outcomePrices", "[]"))
+            if (!m.optBoolean("closed") || prices.length() != outs.length() || prices.length() == 0) null else {
+                var best = 0
+                for (i in 0 until prices.length()) if (prices.getString(i).toDouble() > prices.getString(best).toDouble()) best = i
+                if (prices.getString(best).toDouble() < 0.99) null else if (outs.getString(best).equals("Up", true)) 1 else 0
+            }
+        }
+    } catch (e: Exception) { null }
 
     // ------------------------------------------------------------------ risk (PredictAI RiskManager, from the bet record)
     private fun dayStart(now: Long) = now - (now + 5 * 3_600_000L) % 86_400_000L     // midnight PKT

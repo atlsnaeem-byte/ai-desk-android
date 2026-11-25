@@ -55,7 +55,7 @@ class Btc5mStructParityTest {
                 Btc5mStruct.FlowIn(Btc5mStruct.Bars(pt, d(p, "c"), d(p, "c"), d(p, "c"), d(p, "c"), 1, d(p, "v"), d(p, "tb")),
                     Btc5mStruct.Bars(rt, d(r, "c"), d(r, "c"), d(r, "c"), d(r, "c"), 1))
             } else null
-            val (x, _) = Btc5mStruct.featureVector(tf, T, m.k, if (m.flow) flow else null)
+            val (x, _) = Btc5mStruct.featureVector(tf, T, m.k, if (m.flow) flow else null, m.gap)
             val want = d(cs, "feats")
             if (x.size != want.size) { bad += "case $k: ${x.size} features vs ${want.size}"; continue }
             for (i in x.indices) if (abs(x[i] - want[i]) > 1e-6 * maxOf(1.0, abs(want[i]))) bad += "case $k feat $i: ${x[i]} vs ${want[i]}"
@@ -69,3 +69,4 @@ class Btc5mStructParityTest {
         assertTrue("${mk.id}: " + bad.take(30).joinToString("\n"), bad.isEmpty())
     }
 }
+

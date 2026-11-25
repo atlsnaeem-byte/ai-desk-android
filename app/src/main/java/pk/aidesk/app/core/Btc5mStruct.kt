@@ -56,7 +56,9 @@ object Btc5mStruct {
     class Model(val up: Gbdt, val yClose: Gbdt, val yHigh: Gbdt, val yLow: Gbdt, val threshold: Double, val k: Int,
                 val testStart: String, val testEnd: String, val days: Int, val backtest: List<Bt>,
                 val calConf: DoubleArray = doubleArrayOf(0.5, 1.0), val calP: DoubleArray = doubleArrayOf(0.5, 0.5),
-                val flow: Boolean = false, val atrTf: String = "m5") {
+                val flow: Boolean = false, val atrTf: String = "m5",
+                /** TWAP model (2026-11-25): + start gap features, label = Polymarket TWAP rule; call at the round start */
+                val gap: Boolean = false, val btPx: IntArray = intArrayOf(50, 52, 54, 55)) {
         fun pUp(x: DoubleArray) = 1.0 / (1.0 + exp(-up.raw(x)))
         fun bt(thr: Double) = backtest.minByOrNull { kotlin.math.abs(it.thr - thr) }
         /** Out-of-sample win rate of the called side at this model confidence (isotonic, 6-month backtest). */
@@ -97,8 +99,18 @@ object Btc5mStruct {
         return Model(gb("up"), gb("y_close"), gb("y_high"), gb("y_low"), o.getDouble("threshold"), o.getInt("swing_k"),
             o.getString("test_start"), o.getString("test_end"), o.getInt("days"), bt,
             cal?.let { dbls(it.getJSONArray("conf")) } ?: doubleArrayOf(0.5, 1.0), cal?.let { dbls(it.getJSONArray("p")) } ?: doubleArrayOf(0.5, 0.5),
-            o.optBoolean("flow", false), o.optString("atr_tf", "m5"))
+            o.optBoolean("flow", false), o.optString("atr_tf", "m5"), o.optBoolean("gap", false),
+            o.optJSONArray("bt_px")?.let { ints(it) } ?: intArrayOf(50, 52, 54, 55))
     }
+
+    /**
+     * Polymarket 5m / 15m Up-Down settlement since 2026-08-07 00:00 UTC (Chainlink "TWAP-60s" stream):
+     * UP if the average price of the round's LAST 60 s >= the average price of the 60 s BEFORE the round start.
+     * Before that date: UP if the end price >= the start price.
+     */
+    const val TWAP_FROM = 1_786_060_800_000L
+    /** typical price of a 1m bar = 60 s average proxy (export_twap.py uses the same) */
+    fun tp(b: Bars, i: Int) = (b.h[i] + b.l[i] + b.c[i]) / 3
 
     /** OHLC bars of one timeframe (open times ascending). */
     class Bars(val t: LongArray, val o: DoubleArray, val h: DoubleArray, val l: DoubleArray, val c: DoubleArray, val tfMin: Int,
@@ -220,7 +232,7 @@ object Btc5mStruct {
                  round: Long? = null, flow: FlowIn? = null, mk: Mk = BTC5): Call {
         // round = a later round start (early call): bars ending at it are still forming and are used as they are now
         val T = round ?: (now / mk.round * mk.round)
-        val (x, st) = featureVector(tf, T, m.k, if (m.flow) (flow ?: throw IllegalStateException("order-flow data missing")) else null)
+        val (x, st) = featureVector(tf, T, m.k, if (m.flow) (flow ?: throw IllegalStateException("order-flow data missing")) else null, m.gap)
         val p = m.pUp(x)
         val b5 = tf.getValue(mk.tf)
         val fi = b5.t.indexOfLast { it == T }
@@ -233,10 +245,19 @@ object Btc5mStruct {
     }
 
     /** 36 features for round T from bars of each TF (only bars closed by T are used). Order = structure.FEATURES. */
-    fun featureVector(tf: Map<String, Bars>, T: Long, k: Int, flow: FlowIn? = null): Pair<DoubleArray, Map<String, Tf>> {
+    fun featureVector(tf: Map<String, Bars>, T: Long, k: Int, flow: FlowIn? = null, gap: Boolean = false): Pair<DoubleArray, Map<String, Tf>> {
         val st = TFS.associate { (n, _) -> n to structure(tf.getValue(n).upTo(T), k) }
-        val x = DoubleArray(NF * 3 + 3 + (if (flow != null) NFLOW else 0))
+        val nf = if (flow != null) NFLOW else 0
+        val x = DoubleArray(NF * 3 + 3 + nf + (if (gap) 2 else 0))
         if (flow != null) flowFeatures(tf.getValue("m1").upTo(T), flow.perp, flow.prem).copyInto(x, NF * 3 + 3)
+        if (gap) {
+            // start gap: price at the start vs the 60 s average before it (= the TWAP "price to beat"), in bps and in 5m ATRs
+            val b1 = tf.getValue("m1").upTo(T); val i = b1.size - 1
+            val g = if (i >= 0) (b1.c[i] / tp(b1, i) - 1) * 1e4 else 0.0
+            val atr = st.getValue("m5").f[10]
+            x[NF * 3 + 3 + nf] = if (g.isFinite()) g else 0.0
+            x[NF * 3 + 3 + nf + 1] = if (atr > 0 && g.isFinite()) g / atr else 0.0
+        }
         TFS.forEachIndexed { q, (n, _) -> st.getValue(n).f.copyInto(x, q * NF) }
         x[NF * 3] = (st.getValue("m1").trend + st.getValue("m5").trend + st.getValue("m15").trend).toDouble()
         val hr = ((T / 3_600_000L) % 24).toDouble()
