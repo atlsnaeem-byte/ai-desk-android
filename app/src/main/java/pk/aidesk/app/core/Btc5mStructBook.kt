@@ -219,7 +219,8 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         if (pending.isEmpty()) return
         val res = HashMap<Long, Int>(); val src = HashMap<Long, String>()
         for (T in pending.toList().takeLast(200)) {
-            realResult(T)?.let { res[T] = it; src[T] = "market"; continue }
+            val real = realResult(T)
+            if (real != null) { res[T] = real; src[T] = "market"; continue }
             if (now < T + mk.round + 180_000) continue           // give the market 3 min to publish its result
             val twap = T >= Btc5mStruct.TWAP_FROM
             val a = api.request("GET", "/api/v3/klines", mapOf("symbol" to mk.symbol, "interval" to "1m",
