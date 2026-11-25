@@ -17,10 +17,10 @@ class Btc5mStructParityTest {
     @Test
     fun structMatchesPython() = check("btc5m_struct.json", "btc5m_struct_fixture.json", Btc5mStruct.BTC5)
 
-    /** ETH 5m, BTC 15m, ETH 15m (export_multi.py) */
+    /** ETH 5m (export_multi.py); 15m markets were removed from the app */
     @Test
     fun otherMarketsMatchPython() {
-        for (id in listOf("eth5", "btc15", "eth15")) {
+        for (id in listOf("eth5")) {
             val mk = Btc5mStruct.mk(id)
             assertTrue(id, mk.id == id)
             val m = Btc5mStruct.load(res(mk.asset))
