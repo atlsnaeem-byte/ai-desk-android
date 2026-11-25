@@ -61,8 +61,6 @@ private fun sideCol(side: String) = when (side) { "UP" -> C.Green; "DOWN" -> C.R
 private val MK_NOTE = mapOf(
     "btc5" to "56% rule: 55.8% won · +122 at 54¢ · 7/7 months up",
     "eth5" to "56% rule: 56.1% won · +210 at 54¢ · 7/7 months up (best)",
-    "btc15" to "WEAK · 56% rule: 54.5% won · −77 at 54¢ (needs ≤ 53¢)",
-    "eth15" to "WEAK · 56% rule: 54.5% won · −72 at 54¢ (needs ≤ 53¢)",
 )
 
 @Composable
@@ -89,7 +87,7 @@ fun PredictMarketPicker(vm: AppVM) {
         }
     }
     T("Each market has its own Auto switch, settings and record; Auto runs in the background for every market switched on. " +
-        "BNB and the 1h / 1d rounds tested with no edge, so they are not offered.", 10.sp, C.Dim)
+        "BNB, 15m, 1h and 1d rounds tested with no edge, so they are not offered.", 10.sp, C.Dim)
 }
 
 /** Live 5m chart + the structure AI's call for the current round (refreshes every 3 s while shown). */

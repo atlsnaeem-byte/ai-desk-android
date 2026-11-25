@@ -1,4 +1,4 @@
-﻿package pk.aidesk.app.ui
+package pk.aidesk.app.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -257,9 +257,9 @@ fun SettingsScreen(vm: AppVM, act: MainActivity) {
                 }
             }
             LinkRow("Activity log", "") { vm.loadLogs(); vm.page.value = "logs" }
-            LinkRow("Scanner service", if (running) "running" else "stopped", if (running) C.Green else C.Red) {
-                if (running) TraderService.stop(ctx) else TraderService.start(ctx)
-            }
+            var bgOn by remember { mutableStateOf(TraderService.bgEnabled(ctx)) }
+            SwitchRow("Run in background", if (bgOn) "Yes: signals, alerts and auto-trading continue when the app is closed (service ${if (running) "running" else "stopped"})"
+                else "No: everything runs only while the app is open", bgOn) { bgOn = it; TraderService.setBgEnabled(ctx, it) }
             LinkRow("Battery: unrestricted", if (batteryOk(ctx)) "OK" else "fix", if (batteryOk(ctx)) C.Green else C.Amber) { openBattery(ctx) }
             LinkRow("Exact alarms", if (alarmsOk(ctx)) "OK" else "fix", if (alarmsOk(ctx)) C.Green else C.Amber) { openAlarms(ctx) }
             Gap(24.dp)

@@ -40,9 +40,7 @@ object Btc5mStruct {
     val MARKETS = listOf(
         Mk("btc5", "BTCUSDT", "BTC", 5, "btc5m_struct.json", "btc5ms"),
         Mk("eth5", "ETHUSDT", "ETH", 5, "pred_eth5.json", "pred_eth5"),
-        Mk("btc15", "BTCUSDT", "BTC", 15, "pred_btc15.json", "pred_btc15", weak = true),
-        Mk("eth15", "ETHUSDT", "ETH", 15, "pred_eth15.json", "pred_eth15", weak = true),
-    )
+            )
     val BTC5 get() = MARKETS[0]
     fun mk(id: String?) = MARKETS.firstOrNull { it.id == id } ?: MARKETS[0]
 

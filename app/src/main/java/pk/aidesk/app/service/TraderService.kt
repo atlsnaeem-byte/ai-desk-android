@@ -60,7 +60,16 @@ class TraderService : Service() {
         val running = MutableStateFlow(false)
         @Volatile var instance: TraderService? = null
 
+        fun bgEnabled(ctx: Context) = ctx.getSharedPreferences("aidesk", 0).getBoolean("bgService", true)
+
+        fun setBgEnabled(ctx: Context, on: Boolean) {
+            ctx.getSharedPreferences("aidesk", 0).edit().putBoolean("bgService", on).putBoolean("bgAsked", true).apply()
+            if (on) start(ctx) else if (running.value) stop(ctx)
+        }
+
+        /** Starts the background service unless the user chose "No" (then the app only works while it is open). */
         fun start(ctx: Context, action: String = ACTION_START) {
+            if (!bgEnabled(ctx)) return
             val i = Intent(ctx, TraderService::class.java).setAction(action)
             ContextCompat.startForegroundService(ctx, i)
         }

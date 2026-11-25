@@ -148,6 +148,14 @@ fun App(vm: AppVM, act: MainActivity) {
     Box(Modifier.fillMaxSize().background(C.Bg).systemBarsPadding()) {
         if (!unlocked) { LockScreen { prefs.edit().putBoolean("adminOk", true).apply(); unlocked = true }; return@Box }
         if (!setup) SetupScreen(vm, act) else MainNav(vm, act)
+        var welcome by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(!prefs.getBoolean("bgAsked", false)) }
+        if (setup && welcome) androidx.compose.material3.AlertDialog(onDismissRequest = {}, containerColor = C.Panel,
+            title = { androidx.compose.material3.Text("Welcome to AI Desk") },
+            text = { androidx.compose.material3.Text("Trading is risky: the models have a small edge and results are not guaranteed. Start in Paper mode.\n\n" +
+                "Run in the background? Yes = signals, alerts and auto-trading keep working when the app is closed (uses battery, shows a notification). " +
+                "No = everything runs only while the app is open. You can change this later in Settings.") },
+            confirmButton = { androidx.compose.material3.TextButton({ pk.aidesk.app.service.TraderService.setBgEnabled(act, true); welcome = false }) { androidx.compose.material3.Text("Yes, run in background") } },
+            dismissButton = { androidx.compose.material3.TextButton({ pk.aidesk.app.service.TraderService.setBgEnabled(act, false); welcome = false }) { androidx.compose.material3.Text("No, only when open") } })
         toast?.let { msg ->
             LaunchedEffect(msg) { delay(5000); if (vm.toast.value == msg) vm.toast.value = null }
             Box(Modifier.align(Alignment.BottomCenter).padding(start = 12.dp, end = 12.dp, bottom = 72.dp)
@@ -178,6 +186,7 @@ private fun MainNav(vm: AppVM, act: MainActivity) {
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when (tab) {
+                    "more" -> MoreScreen(vm)
                     "trade" -> pk.aidesk.app.ui.TradeScreen(vm, act)
                     "strats" -> pk.aidesk.app.ui.StrategiesScreen(vm, act)
                     "predict" -> pk.aidesk.app.ui.PredictionScreen(vm, act)
@@ -203,17 +212,40 @@ private fun MainNav(vm: AppVM, act: MainActivity) {
 @Composable
 private fun BottomNav(tab: String, onTab: (String) -> Unit) {
     Row(Modifier.fillMaxWidth().background(C.Panel).padding(vertical = 6.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-        for ((k, label) in listOf("signals" to "Signals", "strats" to "Strategy", "predict" to "Predict", "trade" to "Trade",
-                "positions" to "Positions", "bots" to "Bots", "journal" to "Journal", "settings" to "Settings")) {
-            val on = k == tab
-            Column(Modifier.clip(RoundedCornerShape(10.dp)).clickable { onTab(k) }.padding(horizontal = 4.dp, vertical = 4.dp),
+        val moreTabs = setOf("strats", "bots", "journal", "settings", "more")
+        for ((k, ic, label) in listOf(Triple("signals", "◎", "Signals"), Triple("predict", "◐", "Predict"), Triple("trade", "↗", "Trade"),
+                Triple("positions", "▤", "Positions"), Triple("more", "≡", "More"))) {
+            val on = k == tab || (k == "more" && tab in moreTabs)
+            Column(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).clickable { onTab(k) }.padding(vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(Modifier.clip(RoundedCornerShape(50)).background(if (on) androidx.compose.ui.graphics.Color(0xFF1D3A5C) else C.Panel)
-                    .padding(horizontal = 9.dp, vertical = 5.dp)) {
-                    Box(Modifier.size(7.dp).clip(CircleShape).background(if (on) C.Txt else C.Muted))
+                    .padding(horizontal = 16.dp, vertical = 3.dp)) {
+                    T(ic, 17.sp, if (on) C.Txt else C.Muted)
                 }
-                T(label, 10.sp, if (on) C.Txt else C.Muted, if (on) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
+                T(label, 11.sp, if (on) C.Txt else C.Muted, if (on) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
             }
+        }
+    }
+}
+
+/** Secondary screens grouped behind one tab so the bottom bar stays at 5 items. */
+@Composable
+private fun MoreScreen(vm: AppVM) {
+    Column(Modifier.fillMaxSize()) {
+        TopBar(vm, "More")
+        Column(Modifier.padding(horizontal = 14.dp)) {
+            for ((k, title, sub) in listOf(
+                Triple("strats", "Strategy", "Gold and rule-based strategies"),
+                Triple("bots", "Bots", "Short hunter and copy trading"),
+                Triple("journal", "Journal", "Past trades and signal results"),
+                Triple("settings", "Settings", "Mode, API key, risk, background service"))) {
+                pk.aidesk.app.ui.Card(Modifier.padding(bottom = 8.dp), onClick = { vm.tab.value = k; vm.page.value = null }) {
+                    T(title, 16.sp, C.Txt, FontWeight.Bold)
+                    T(sub, 12.sp, C.Muted)
+                }
+            }
+            T("Trading is risky. Model edges are small and results are not guaranteed. Use Paper mode until you are comfortable.",
+                11.sp, C.Dim, modifier = Modifier.padding(top = 8.dp))
         }
     }
 }
