@@ -41,7 +41,7 @@ class PredictionApiTest {
         var last = 0.0
         for (k in 0..50) {
             val p = m.winProb(0.5 + k * 0.01)
-            assertTrue("p $p at ${0.5 + k * 0.01}", p >= last - 1e-12 && p in 0.45..0.7)
+            assertTrue("p $p at ${0.5 + k * 0.01}", p >= last - 1e-12 && p in 0.45..0.8)   // TWAP model (2026-11-25) calibrates up to ~72%
             last = p
         }
     }
