@@ -38,6 +38,7 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         val early: Boolean = false,        // call BEFORE the round starts (from the still-forming candles)
         val leadSec: Int = 30,             // ... this many seconds before (10 or 30)
         val hoursMask: Int = ALL_HOURS,    // hour clusters (PKT) to bet in: bits 0-5 = weekday 4h blocks 00-04..20-24, bits 6-11 = weekend
+        val maxPriceCents: Double = 0.0,   // hard cap: never pay more than this many cents per share (0 = off)
     ) {
         val thr get() = thrPct / 100
         /** Is the round starting at T inside the selected hour clusters? (PKT: Mon-Fri = weekday, Sat-Sun = weekend) */
@@ -46,7 +47,7 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         fun json() = JSONObject().put("v", 5).put("auto", auto).put("mode", mode).put("stake", stake).put("thrPct", thrPct)
             .put("paperCents", paperCents).put("alerts", alerts).put("minP", minP).put("minEdgePct", minEdgePct)
             .put("windowSec", windowSec).put("useQuotes", useQuotes).put("armed", armed).put("killSwitch", killSwitch)
-            .put("dailyLossUsdt", dailyLossUsdt).put("maxTradesDay", maxTradesDay).put("lossStreak", lossStreak).put("pauseMin", pauseMin).put("early", early).put("leadSec", leadSec).put("hoursMask", hoursMask)
+            .put("dailyLossUsdt", dailyLossUsdt).put("maxTradesDay", maxTradesDay).put("lossStreak", lossStreak).put("pauseMin", pauseMin).put("early", early).put("leadSec", leadSec).put("hoursMask", hoursMask).put("maxPriceCents", maxPriceCents)
         companion object {
             const val ALL_HOURS = 0xFFF
             /** 180-day BTC 5m scan: weekday 08-12 and 20-24 PKT were weakest on BTC and ETH in both halves */
@@ -68,7 +69,7 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
                     o.optDouble("paperCents", d.paperCents), o.optBoolean("alerts", d.alerts), o.optDouble("minP", d.minP),
                     o.optDouble("minEdgePct", d.minEdgePct), o.optInt("windowSec", d.windowSec), o.optBoolean("useQuotes", d.useQuotes),
                     o.optBoolean("armed", d.armed), o.optBoolean("killSwitch", d.killSwitch), o.optDouble("dailyLossUsdt", d.dailyLossUsdt),
-                    o.optInt("maxTradesDay", d.maxTradesDay), o.optInt("lossStreak", d.lossStreak), o.optInt("pauseMin", d.pauseMin), o.optBoolean("early", d.early), o.optInt("leadSec", 10), o.optInt("hoursMask", ALL_HOURS))
+                    o.optInt("maxTradesDay", d.maxTradesDay), o.optInt("lossStreak", d.lossStreak), o.optInt("pauseMin", d.pauseMin), o.optBoolean("early", d.early), o.optInt("leadSec", 10), o.optInt("hoursMask", ALL_HOURS), o.optDouble("maxPriceCents", d.maxPriceCents))
                 // v2 (2026-11-22): one rule only, P(UP) >= 52% -> UP, <= 48% -> DOWN, every call bet; edge gate off
                 // v3 (2026-11-22): exactly the 1-second backtest that made +$322 in 60 days: 52% rule, call + buy 10 s before the
                 // round start, every call bet ($1, no price check), no daily / streak / trade-count limits, no kill switch
@@ -346,6 +347,11 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         }
         val price = cost / shares
         val edge = (p * shares - cost) / cost * 100
+        if (cfg.maxPriceCents > 0 && price * 100 > cfg.maxPriceCents) {
+            // price cap: the share can still get cheaper inside the window, so retry with a fresh quote (not for the paper price)
+            return skip("price ${String.format(us, "%.1f", price * 100)} cents > cap ${String.format(us, "%.0f", cfg.maxPriceCents)} cents",
+                price, edge, done = q == null)
+        }
         if (edge < cfg.minEdgePct) {
             // the share price can still drop inside the window: retry with a fresh quote unless it is the paper price
             return skip("edge ${String.format(us, "%+.1f", edge)}% < ${cfg.minEdgePct}% at ${String.format(us, "%.1f", price * 100)}¢ (break-even ${String.format(us, "%.1f", p * 100)}¢)",

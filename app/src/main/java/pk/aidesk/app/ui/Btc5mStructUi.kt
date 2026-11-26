@@ -362,6 +362,14 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
             Pill("Off · bet every call", C.Blue, filled = cfg.minEdgePct <= -100.0) { vm.saveStructCfg(cfg.copy(minEdgePct = -100.0, minP = 0.0)) }
             for (e in listOf(0.0, 2.0, 5.0)) Pill("${e.toInt()}%", C.Blue, filled = cfg.minEdgePct == e) { vm.saveStructCfg(cfg.copy(minEdgePct = e, minP = 0.0)) }
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            T("Max price", 11.sp, C.Muted)
+            Pill("Off", C.Blue, filled = cfg.maxPriceCents <= 0.0) { vm.saveStructCfg(cfg.copy(maxPriceCents = 0.0)) }
+            for (cp in listOf(50.0, 55.0, 60.0, 65.0)) Pill("${cp.toInt()}c", C.Blue, filled = cfg.maxPriceCents == cp) { vm.saveStructCfg(cfg.copy(maxPriceCents = cp)) }
+        }
+        T(if (cfg.maxPriceCents > 0.0) "Never buys a share that costs more than ${cfg.maxPriceCents.toInt()} cents, even if the edge check passes; " +
+            "the quote is re-checked until the window closes. Early test only (ETH, 5 days of real prices): a 60 cent cap looked better than no cap."
+          else "Off: only the min-edge check limits the price you pay.", 10.sp, C.Dim)
         Gap(4.dp)
         if (cfg.early) T("Buys at ${cfg.leadSec} s before the round starts (e.g. 12:${if (bv.mk.roundMin == 15) "59" else "54"}:${60 - cfg.leadSec} for the ${if (bv.mk.roundMin == 15) "13:00" else "12:55"} round). If the buy can't be made " +
             "before the start, that round is skipped: no buying after the start.", 11.sp, C.Muted)
