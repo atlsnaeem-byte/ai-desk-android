@@ -39,6 +39,10 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         val leadSec: Int = 30,             // ... this many seconds before (10 or 30)
         val hoursMask: Int = ALL_HOURS,    // hour clusters (PKT) to bet in: bits 0-5 = weekday 4h blocks 00-04..20-24, bits 6-11 = weekend
         val maxPriceCents: Double = 0.0,   // hard cap: never pay more than this many cents per share (0 = off)
+        val stakeMode: String = "flat",    // flat | edge: stake = base stake x edge / edgeUnitPct, up to stakeCapX x base (LIVE floor 1.5)
+        val edgeUnitPct: Double = 10.0,
+        val stakeCapX: Double = 3.0,
+        val orderTries: Int = 3,           // LIVE: a killed (not filled) FOK order is re-quoted and sent again, up to this many orders per round
     ) {
         val thr get() = thrPct / 100
         /** Is the round starting at T inside the selected hour clusters? (PKT: Mon-Fri = weekday, Sat-Sun = weekend) */
@@ -48,6 +52,7 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
             .put("paperCents", paperCents).put("alerts", alerts).put("minP", minP).put("minEdgePct", minEdgePct)
             .put("windowSec", windowSec).put("useQuotes", useQuotes).put("armed", armed).put("killSwitch", killSwitch)
             .put("dailyLossUsdt", dailyLossUsdt).put("maxTradesDay", maxTradesDay).put("lossStreak", lossStreak).put("pauseMin", pauseMin).put("early", early).put("leadSec", leadSec).put("hoursMask", hoursMask).put("maxPriceCents", maxPriceCents)
+            .put("stakeMode", stakeMode).put("edgeUnitPct", edgeUnitPct).put("stakeCapX", stakeCapX).put("orderTries", orderTries)
         companion object {
             const val ALL_HOURS = 0xFFF
             /** 180-day BTC 5m scan: weekday 08-12 and 20-24 PKT were weakest on BTC and ETH in both halves */
@@ -69,7 +74,8 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
                     o.optDouble("paperCents", d.paperCents), o.optBoolean("alerts", d.alerts), o.optDouble("minP", d.minP),
                     o.optDouble("minEdgePct", d.minEdgePct), o.optInt("windowSec", d.windowSec), o.optBoolean("useQuotes", d.useQuotes),
                     o.optBoolean("armed", d.armed), o.optBoolean("killSwitch", d.killSwitch), o.optDouble("dailyLossUsdt", d.dailyLossUsdt),
-                    o.optInt("maxTradesDay", d.maxTradesDay), o.optInt("lossStreak", d.lossStreak), o.optInt("pauseMin", d.pauseMin), o.optBoolean("early", d.early), o.optInt("leadSec", 10), o.optInt("hoursMask", ALL_HOURS), o.optDouble("maxPriceCents", d.maxPriceCents))
+                    o.optInt("maxTradesDay", d.maxTradesDay), o.optInt("lossStreak", d.lossStreak), o.optInt("pauseMin", d.pauseMin), o.optBoolean("early", d.early), o.optInt("leadSec", 10), o.optInt("hoursMask", ALL_HOURS), o.optDouble("maxPriceCents", d.maxPriceCents),
+                    o.optString("stakeMode", d.stakeMode), o.optDouble("edgeUnitPct", d.edgeUnitPct), o.optDouble("stakeCapX", d.stakeCapX), o.optInt("orderTries", d.orderTries))
                 // v2 (2026-11-22): one rule only, P(UP) >= 52% -> UP, <= 48% -> DOWN, every call bet; edge gate off
                 // v3 (2026-11-22): exactly the 1-second backtest that made +$322 in 60 days: 52% rule, call + buy 10 s before the
                 // round start, every call bet ($1, no price check), no daily / streak / trade-count limits, no kill switch
@@ -107,7 +113,10 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
     private val CFG = "${mk.prefix}_cfg.json"; private val ROUNDS = "${mk.prefix}_rounds.json"; private val BETS = "${mk.prefix}_bets.json"
     private val STATUS = "${mk.prefix}_status.json"
     /** a market never set up starts with auto OFF (only BTC 5m keeps its old default: on) */
-    fun cfg() = store.readObj(CFG)?.let { Cfg.of(it) } ?: Cfg(auto = mk.id == Btc5mStruct.BTC5.id)
+    fun cfg(): Cfg {
+        val c = store.readObj(CFG)?.let { Cfg.of(it) } ?: Cfg(auto = mk.id == Btc5mStruct.BTC5.id, windowSec = if (mk.s1) 45 else 20)
+        return if (mk.s1 && c.early) c.copy(early = false) else c        // the 1-second model calls 10 s AFTER the start
+    }
     fun saveCfg(c: Cfg) = store.writeObj(CFG, c.json())
 
     fun status(): Pair<Long, String> = store.readObj(STATUS)?.let { it.optLong("t") to it.optString("s") } ?: (0L to "")
@@ -287,6 +296,42 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
     }
 
     // ------------------------------------------------------------------ the shared entry path
+    /** killed (not filled) orders per round, for the retry limit (in memory: it only matters inside the entry window) */
+    private val failedTries = HashMap<Long, Int>()
+
+    /**
+     * Stake in USDT. flat: the base stake. edge: base x edge / edgeUnitPct, edge = calibrated win rate x (1 - fee) / price - 1, capped at
+     * stakeCapX x base; LIVE floor 1.5 (the exchange minimum). 0 = no edge at this price: no bet. No price known: the base stake.
+     */
+    fun sizedStake(cfg: Cfg, p: Double, price: Double?, mode: String): Double {
+        if (cfg.stakeMode != "edge" || price == null || !(price > 0.0)) return cfg.stake
+        val edge = p * (1 - PredictionApi.FEE_BPS / 10_000.0) / price - 1
+        if (edge <= 0.0) return 0.0
+        val lo = if (mode == "live") 1.5 else 0.1
+        return (cfg.stake * edge * 100 / cfg.edgeUnitPct).coerceIn(lo, maxOf(lo, cfg.stake * cfg.stakeCapX))
+    }
+
+    /** exchange order status -> "NOT FILLED" / "PARTIAL" / "FILLED"; null = still pending or unknown wording */
+    fun classify(status: String?): String? {
+        val s = status?.lowercase() ?: return null
+        return when {
+            listOf("fail", "cancel", "reject", "expire", "kill", "unfill", "refund").any { s.contains(it) } -> "NOT FILLED"
+            s.contains("partial") -> "PARTIAL"
+            s.contains("fill") -> "FILLED"
+            else -> null
+        }
+    }
+
+    /** Watch a just-placed order for a moment: "NOT FILLED" / "FILLED" / "PARTIAL", or null = not visible or still pending. */
+    private fun confirmFill(api: PredictionApi, w: PredictionApi.Wallet, id: String): String? {
+        for (i in 0 until 4) {
+            Thread.sleep(if (i == 0) 1_000L else 1_500L)
+            val s = runCatching { api.orders(w).firstOrNull { it.orderId == id }?.status }.getOrNull()
+            classify(s)?.let { return it }
+        }
+        return null
+    }
+
     /** quiet = skipped on purpose (outside the selected hours): no alert */
     class Step(val done: Boolean, val text: String, val placed: Boolean = false, val quiet: Boolean = false)
 
@@ -321,19 +366,23 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         var wallet: PredictionApi.Wallet? = null
         var plan: PredictionApi.Funding? = null
         var market: PredictionApi.Market? = null
+        var stake = cfg.stake
         if (api != null && (mode == "live" || cfg.useQuotes)) {
             try {
                 wallet = api.wallet()
                 val bal = api.balances()
-                plan = api.funding(bal, runCatching { api.walletBalance(wallet) }.getOrNull(), cfg.stake)
-                if (plan == null && mode == "live") return skip("not enough Prediction balance for ${cfg.stake} USDT")
                 market = try { api.market(T, mk) } catch (e: UserError) {
                     if (cfg.early) { noteDiag(T, api.lastDiag); return Step(false, "next round market not listed yet (${(now - T) / 1000}s)") } else throw e
                 }
                 noteDiag(T, api.lastDiag)
                 if (cfg.early) noteMarket(T, now, market.let { if (c.side == "UP") it.up.price else it.down.price })
                 val tok = if (c.side == "UP") market.up else market.down
-                q = api.quote(wallet, tok.tokenId, cfg.stake, minOf(market.slippageBps, 200), plan?.source ?: "MPC")
+                // stake by edge: size the bet from the calibrated win rate against the listed price (the real quote is checked again below)
+                stake = sizedStake(cfg, p, tok.price, mode)
+                if (stake <= 0.0) return skip("stake by edge: no edge at the listed price ${String.format(us, "%.1f", (tok.price ?: 0.0) * 100)} cents", done = false)
+                plan = api.funding(bal, runCatching { api.walletBalance(wallet) }.getOrNull(), stake)
+                if (plan == null && mode == "live") return skip("not enough Prediction balance for ${String.format(us, "%.2f", stake)} USDT")
+                q = api.quote(wallet, tok.tokenId, stake, minOf(market.slippageBps, 200), plan?.source ?: "MPC")
                 if (q.expireAt > 0 && q.expireAt <= api.nowMs()) return Step(false, "quote expired, retrying")
                 if (!(q.shares > 0)) return Step(false, "quote returned no shares, retrying")
                 cost = q.cost; shares = q.shares; source = "quote"
@@ -342,10 +391,14 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
                 if (mode == "live") return Step(false, "quote failed: $m")
                 // paper falls back to the paper price
                 q = null
-                cost = cfg.stake; shares = cfg.stake * (1 - fee) / (cfg.paperCents / 100); source = "paper price (quote failed: ${m.take(60)})"
+                stake = sizedStake(cfg, p, cfg.paperCents / 100, mode)
+                if (stake <= 0.0) return skip("stake by edge: no edge at the paper price", done = false)
+                cost = stake; shares = stake * (1 - fee) / (cfg.paperCents / 100); source = "paper price (quote failed: ${m.take(60)})"
             }
         } else {
-            cost = cfg.stake; shares = cfg.stake * (1 - fee) / (cfg.paperCents / 100); source = "paper price"
+            stake = sizedStake(cfg, p, cfg.paperCents / 100, mode)
+            if (stake <= 0.0) return skip("stake by edge: no edge at the paper price")
+            cost = stake; shares = stake * (1 - fee) / (cfg.paperCents / 100); source = "paper price"
         }
         val price = cost / shares
         val edge = (p * shares - cost) / cost * 100
@@ -373,7 +426,17 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         mark(T)
         return try {
             val id = api!!.placeOrder(w, quote, pl.accountType, minOf(mkt.slippageBps, 200), pl.source)
-            addBet("live", T, c.side, price * 100, cost, auto = true, orderId = id, winP = p)
+            // a FOK order that the exchange kills still returns an id: look the order up before it counts as a bet
+            val fill = confirmFill(api, w, id)
+            if (fill == "NOT FILLED") {
+                unmark(T)
+                val n = (failedTries[T] ?: 0) + 1; failedTries[T] = n
+                if (failedTries.size > 50) failedTries.keys.filter { it < T - 3_600_000L }.forEach { failedTries.remove(it) }
+                noteRound(T, "order $id killed by the exchange (not filled), order $n of ${cfg.orderTries}", price, edge)
+                return if (n >= cfg.orderTries) Step(true, "order not filled $n times: round skipped, no money spent")
+                       else Step(false, "order not filled (killed), re-quoting: order $n of ${cfg.orderTries}")
+            }
+            addBet("live", T, c.side, price * 100, cost, auto = true, orderId = id, winP = p, status = fill ?: "OK")
             noteRound(T, "LIVE ${c.side} at ${(now - T) / 1000}s · order $id · ${String.format(us, "%.1f", price * 100)}¢ · edge ${String.format(us, "%+.1f", edge)}%", price, edge)
             Step(true, "LIVE ${c.side} ${String.format(us, "%.2f", cost)} USDT at ${String.format(us, "%.1f", price * 100)}¢ · order $id", placed = true)
         } catch (e: BinanceException) {
@@ -403,14 +466,8 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         val byId = api.orders(api.wallet()).associateBy { it.orderId }
         val upd = HashMap<Long, String>()
         for (o in pend) {
-            val s = byId[o.optString("orderId")]?.status?.lowercase() ?: continue
-            val ns = when {
-                listOf("fail", "cancel", "reject", "expire", "kill", "unfill", "refund").any { s.contains(it) } -> "NOT FILLED"
-                s.contains("partial") -> "PARTIAL"
-                s.contains("fill") -> "FILLED"
-                else -> null
-            }
-            if (ns != null) upd[o.getLong("id")] = ns
+            val ns = classify(byId[o.optString("orderId")]?.status) ?: continue
+            upd[o.getLong("id")] = ns
         }
         if (upd.isEmpty()) return
         synchronized(this) { saveBets(raw(BETS).onEach { o -> upd[o.getLong("id")]?.let { o.put("status", it) } }) }

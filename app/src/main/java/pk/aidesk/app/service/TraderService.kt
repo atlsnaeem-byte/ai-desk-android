@@ -340,6 +340,12 @@ class TraderService : Service() {
                         delay((R - api.nowMs() % R - lead).coerceAtLeast(0L))
                         continue
                     }
+                    // 1-second model: the call needs the first 10 s of the round, so wait until the bar that ends at T + 10 s is final
+                    if (mk.s1) {
+                        val phNow = api.nowMs() % R
+                        val need = pk.aidesk.app.core.Btc5mS1.D * 1000L + 700L
+                        if (phNow < need) { structTicks.value = System.currentTimeMillis(); delay(need - phNow) }
+                    }
                     val nextRound = if (cfg.early && ph >= R - lead - 5_000L) (api.nowMs() / R + 1) * R else null
                     val call = if (cfg.early && nextRound == null) null
                                else pk.aidesk.app.core.Btc5mStruct.scan(api, m, cfg.thr, nextRound, mk)
@@ -354,7 +360,7 @@ class TraderService : Service() {
                         // early: retry only until the round starts; at round start: until the entry window closes
                         while (!step.done && (if (cfg.early) api.nowMs() < call.roundStart else api.nowMs() - call.roundStart < cfg.windowSec * 1000L)) {
                             book.setStatus(step.text); structTicks.value = System.currentTimeMillis()
-                            delay(if (cfg.early) 1_500L else 8_000L)
+                            delay(if (cfg.early) 1_500L else if (step.text.startsWith("order not filled")) 2_000L else 8_000L)
                             step = attempt(book.cfg())
                         }
                         book.setStatus("${hhmmUtc(call.roundStart)} ${call.side} · ${step.text}")

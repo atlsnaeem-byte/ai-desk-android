@@ -30,9 +30,9 @@ object Btc5mStruct {
      * BTC/ETH 5m are the usable ones; 15m is weaker; BNB (5m/15m) and all 1h rounds had no edge and are not offered.
      */
     data class Mk(val id: String, val symbol: String, val coin: String, val roundMin: Int, val asset: String, val prefix: String,
-                  val weak: Boolean = false) {
+                  val weak: Boolean = false, val s1: Boolean = false) {
         val round get() = roundMin * MIN
-        val label get() = "$coin ${roundMin}m"
+        val label get() = if (s1) "$coin ${roundMin}m 1s model" else "$coin ${roundMin}m"
         /** timeframe whose candles the chart shows / the projected candle is scaled by */
         val tf get() = if (roundMin == 15) "m15" else "m5"
         val webUrl get() = "https://www.binance.com/en/prediction/market-detail/${coin.lowercase()}-up-or-down-${roundMin}m"
@@ -40,6 +40,7 @@ object Btc5mStruct {
     val MARKETS = listOf(
         Mk("btc5", "BTCUSDT", "BTC", 5, "btc5m_struct.json", "btc5ms"),
         Mk("eth5", "ETHUSDT", "ETH", 5, "pred_eth5.json", "pred_eth5"),
+        Mk("eth5s", "ETHUSDT", "ETH", 5, "pred_eth5s.json", "pred_eth5s", s1 = true),
             )
     val BTC5 get() = MARKETS[0]
     fun mk(id: String?) = MARKETS.firstOrNull { it.id == id } ?: MARKETS[0]
@@ -56,7 +57,9 @@ object Btc5mStruct {
                 val calConf: DoubleArray = doubleArrayOf(0.5, 1.0), val calP: DoubleArray = doubleArrayOf(0.5, 0.5),
                 val flow: Boolean = false, val atrTf: String = "m5",
                 /** TWAP model (2026-11-25): + start gap features, label = Polymarket TWAP rule; call at the round start */
-                val gap: Boolean = false, val btPx: IntArray = intArrayOf(50, 52, 54, 55)) {
+                val gap: Boolean = false, val btPx: IntArray = intArrayOf(50, 52, 54, 55),
+                /** 1-second model (2026-11-27): features from 1 s klines at round start + 10 s (Btc5mS1), no 1m structure features */
+                val s1: Boolean = false) {
         fun pUp(x: DoubleArray) = 1.0 / (1.0 + exp(-up.raw(x)))
         fun bt(thr: Double) = backtest.minByOrNull { kotlin.math.abs(it.thr - thr) }
         /** Out-of-sample win rate of the called side at this model confidence (isotonic, 6-month backtest). */
@@ -98,7 +101,7 @@ object Btc5mStruct {
             o.getString("test_start"), o.getString("test_end"), o.getInt("days"), bt,
             cal?.let { dbls(it.getJSONArray("conf")) } ?: doubleArrayOf(0.5, 1.0), cal?.let { dbls(it.getJSONArray("p")) } ?: doubleArrayOf(0.5, 0.5),
             o.optBoolean("flow", false), o.optString("atr_tf", "m5"), o.optBoolean("gap", false),
-            o.optJSONArray("bt_px")?.let { ints(it) } ?: intArrayOf(50, 52, 54, 55))
+            o.optJSONArray("bt_px")?.let { ints(it) } ?: intArrayOf(50, 52, 54, 55), o.optBoolean("s1", false))
     }
 
     /**
@@ -317,6 +320,7 @@ object Btc5mStruct {
 
     /** Download 1m / 5m / 15m Binance SPOT candles + live price and evaluate the current round. Blocking. */
     fun scan(api: Binance, m: Model, threshold: Double = m.threshold, round: Long? = null, mk: Mk = BTC5): Call {
+        if (m.s1) return scanS1(api, m, threshold, round, mk)
         val now = api.nowMs()
         val s = mk.symbol
         val tf = mapOf("m1" to bars(api, s, "1m", 1), "m5" to bars(api, s, "5m", 5), "m15" to bars(api, s, "15m", 15))
@@ -341,5 +345,31 @@ object Btc5mStruct {
         val R = mk.round
         flow = flow?.let { f -> FlowIn(f.perp.upTo(now / R * R), f.prem.upTo(now / R * R)) }
         return evaluate(m, tf, now, px, threshold, null, flow, mk)
+    }
+
+    /**
+     * 1-second model (market eth5s): the call is made D s after the round start from the 1 s bars (Btc5mS1); the features use only
+     * data up to T + D, so the call is the same whenever it is computed after that. Same 1m/5m/15m candles for the chart; no projected
+     * candle (projection = open). No early call.
+     */
+    private fun scanS1(api: Binance, m: Model, threshold: Double, round: Long?, mk: Mk): Call {
+        if (round != null) throw IllegalStateException("the 1-second model has no early call")
+        val now = api.nowMs(); val T = now / mk.round * mk.round
+        if (now - T < Btc5mS1.D * 1000L + 300L) throw IllegalStateException("1-second model: the call is made ${Btc5mS1.D} s after the round start")
+        val s = mk.symbol
+        val tf = mapOf("m1" to bars(api, s, "1m", 1), "m5" to bars(api, s, "5m", 5), "m15" to bars(api, s, "15m", 15))
+        for ((n, b) in tf) for (q in 1 until b.size) if (b.t[q] - b.t[q - 1] != b.tfMin * MIN) throw IllegalStateException("gap in ${mk.coin} $n bars")
+        val px = (api.request("GET", "/api/v3/ticker/price", mapOf("symbol" to s), host = Binance.SPOT) as JSONObject).getString("price").toDouble()
+        val b1 = tf.getValue("m1")
+        val ih = b1.t.indexOfLast { it == T - 3_660_000L }
+        if (ih < 0) throw IllegalStateException("1m bar one hour before the round not found")
+        val sec = Btc5mS1.fetch(api, s, T)
+        val x = Btc5mS1.features(sec, T, b1.c[ih]) ?: throw IllegalStateException("1-second data incomplete")
+        val p = m.pUp(x)
+        val st = TFS.associate { (n, _) -> n to structure(tf.getValue(n).upTo(T), m.k) }
+        val b5 = tf.getValue(mk.tf); val fi = b5.t.indexOfLast { it == T }
+        val open = if (fi >= 0) b5.o[fi] else b1.t.indexOfLast { it == T }.let { if (it >= 0) b1.o[it] else px }
+        val form = if (fi >= 0) doubleArrayOf(b5.o[fi], maxOf(b5.h[fi], px), minOf(b5.l[fi], px), px) else null
+        return Call(now, T, open, px, p, threshold, open, open, open, st, b5.upTo(T), form, mk).also { it.winP = m.winProb(it.conf) }
     }
 }
