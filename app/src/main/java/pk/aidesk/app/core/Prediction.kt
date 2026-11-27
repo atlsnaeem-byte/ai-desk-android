@@ -171,6 +171,14 @@ class PredictionApi(private val key: String, private val secret: String) {
         return null
     }
 
+    /** Biggest balance the funding route could spend (CeDeFi/MPC incl. wallet balance, SPOT, FUNDING): the bankroll for Kelly sizing. */
+    fun bankroll(bal: List<Balance>, walletBalance: Double?): Double {
+        val rows = bal.filter { it.enabled }
+        fun isT(b: Balance, vararg n: String) = n.any { b.accountType.equals(it, true) }
+        val mpc = maxOf(rows.firstOrNull { isT(it, "CeDeFi", "MPC", "WEB3", "PREDICTION") }?.balance ?: 0.0, walletBalance ?: 0.0)
+        return maxOf(mpc, rows.firstOrNull { isT(it, "SPOT") }?.balance ?: 0.0, rows.firstOrNull { isT(it, "FUNDING") }?.balance ?: 0.0)
+    }
+
     // ------------------------------------------------------------------ markets
     private val upW = Regex("\\b(UP|HIGHER|GREEN|ABOVE)\\b")
     private val dnW = Regex("\\b(DOWN|LOWER|RED|BELOW)\\b")

@@ -51,6 +51,7 @@ import kotlinx.coroutines.delay
 import pk.aidesk.app.MainActivity
 import pk.aidesk.app.core.Btc5mStruct
 import pk.aidesk.app.core.Btc5mStructBook
+import pk.aidesk.app.core.Staking
 import pk.aidesk.app.service.TraderService
 import java.util.Locale
 import kotlin.math.max
@@ -456,12 +457,30 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         Gap(4.dp)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Stake", 11.sp, C.Muted)
-            Pill("Flat", C.Blue, filled = cfg.stakeMode != "edge") { vm.saveStructCfg(cfg.copy(stakeMode = "flat")) }
+            Pill("Flat", C.Blue, filled = cfg.stakeMode !in Staking.MODES || cfg.stakeMode == "flat") { vm.saveStructCfg(cfg.copy(stakeMode = "flat")) }
             Pill("By edge", C.Blue, filled = cfg.stakeMode == "edge") { vm.saveStructCfg(cfg.copy(stakeMode = "edge")) }
+            Pill("Edge tiers", C.Blue, filled = cfg.stakeMode == "tiers") { vm.saveStructCfg(cfg.copy(stakeMode = "tiers")) }
+            Pill("Quarter-Kelly", C.Blue, filled = cfg.stakeMode == "kelly") { vm.saveStructCfg(cfg.copy(stakeMode = "kelly")) }
         }
-        T(if (cfg.stakeMode == "edge") "Stake = base stake x edge / ${cfg.edgeUnitPct.toInt()}%, at most ${cfg.stakeCapX.toInt()}x the base (LIVE minimum 1.5 USDT). " +
-            "Edge = backtest win rate x 0.98 / share price - 1, so a cheaper share gets a bigger bet and no edge = no bet. Early backtest only: test it on PAPER first."
-          else "Flat: every bet is the base stake.", 10.sp, C.Dim)
+        if (cfg.stakeMode == "kelly") Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            T("Paper bankroll", 11.sp, C.Muted)
+            for (b in listOf(50.0, 100.0, 200.0, 500.0)) Pill("${b.toInt()}", C.Blue, filled = cfg.bankroll == b) { vm.saveStructCfg(cfg.copy(bankroll = b)) }
+        }
+        T(when (cfg.stakeMode) {
+            "edge" -> "Stake = base stake x edge / ${cfg.edgeUnitPct.toInt()}%, at most ${cfg.stakeCapX.toInt()}x the base (LIVE minimum 1.5 USDT). " +
+                "Edge = backtest win rate x 0.98 / share price - 1, so a cheaper share gets a bigger bet and no edge = no bet. Early backtest only: test it on PAPER first."
+            "tiers" -> "Stake by edge size: below 0% no bet, 0-5% half the base stake, 5-10% the base stake, 10% or more double (LIVE minimum 1.5 USDT, so " +
+                "use a base of 3 or more for the half tier to be smaller). Backtest Nov 2026: +\$303 per \$1 base vs flat-every-call -\$30 (prices partly simulated)."
+            "kelly" -> "Stake = ${(cfg.kellyFrac * 100).toInt()}% of the Kelly stake x bankroll, at most ${String.format(US, "%.0f", cfg.kellyCapPct)}% of the bankroll per bet " +
+                "(bankroll = your real Prediction balance in LIVE, the paper bankroll above in PAPER; LIVE minimum 1.5 USDT). The base stake is not used. " +
+                "Biggest P&L in the backtest but also the biggest swings: stakes follow the balance, so they shrink after losses and grow after wins."
+            else -> "Flat: every bet is the base stake."
+        }, 10.sp, C.Dim)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            T("Preset", 11.sp, C.Muted)
+            Pill("Best backtest mix", C.Green) { vm.saveStructCfg(cfg.copy(minEdgePct = 5.0, minP = 0.0, maxPriceCents = 60.0, stakeMode = "edge")) }
+        }
+        T("One tap: min edge 5%, max price 60 cents, stake by edge (the best ROI in the Nov 2026 and 2-year backtest). You can still change each setting above.", 10.sp, C.Dim)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("LIVE orders per round", 11.sp, C.Muted)
             for (n in listOf(1, 2, 3, 5)) Pill(if (n == 1) "1 (no retry)" else "$n", C.Blue, filled = cfg.orderTries == n) { vm.saveStructCfg(cfg.copy(orderTries = n)) }

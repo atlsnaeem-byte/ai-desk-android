@@ -39,10 +39,13 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         val leadSec: Int = 30,             // ... this many seconds before (10 or 30)
         val hoursMask: Int = ALL_HOURS,    // hour clusters (PKT) to bet in: bits 0-5 = weekday 4h blocks 00-04..20-24, bits 6-11 = weekend
         val maxPriceCents: Double = 0.0,   // hard cap: never pay more than this many cents per share (0 = off)
-        val stakeMode: String = "flat",    // flat | edge: stake = base stake x edge / edgeUnitPct, up to stakeCapX x base (LIVE floor 1.5)
+        val stakeMode: String = "flat",    // flat | edge | tiers | kelly (rules in Staking.kt; LIVE floor 1.5)
         val edgeUnitPct: Double = 10.0,
         val stakeCapX: Double = 3.0,
         val orderTries: Int = 3,           // LIVE: a killed (not filled) FOK order is re-quoted and sent again, up to this many orders per round
+        val kellyFrac: Double = 0.25,      // kelly mode: fraction of the full Kelly stake (0.25 = quarter-Kelly)
+        val kellyCapPct: Double = 4.0,     // kelly mode: one bet is at most this % of the bankroll
+        val bankroll: Double = 100.0,      // kelly mode, PAPER: bankroll in USDT (LIVE uses the real Prediction balance)
     ) {
         val thr get() = thrPct / 100
         /** Is the round starting at T inside the selected hour clusters? (PKT: Mon-Fri = weekday, Sat-Sun = weekend) */
@@ -53,6 +56,7 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
             .put("windowSec", windowSec).put("useQuotes", useQuotes).put("armed", armed).put("killSwitch", killSwitch)
             .put("dailyLossUsdt", dailyLossUsdt).put("maxTradesDay", maxTradesDay).put("lossStreak", lossStreak).put("pauseMin", pauseMin).put("early", early).put("leadSec", leadSec).put("hoursMask", hoursMask).put("maxPriceCents", maxPriceCents)
             .put("stakeMode", stakeMode).put("edgeUnitPct", edgeUnitPct).put("stakeCapX", stakeCapX).put("orderTries", orderTries)
+            .put("kellyFrac", kellyFrac).put("kellyCapPct", kellyCapPct).put("bankroll", bankroll)
         companion object {
             const val ALL_HOURS = 0xFFF
             /** 180-day BTC 5m scan: weekday 08-12 and 20-24 PKT were weakest on BTC and ETH in both halves */
@@ -75,7 +79,8 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
                     o.optDouble("minEdgePct", d.minEdgePct), o.optInt("windowSec", d.windowSec), o.optBoolean("useQuotes", d.useQuotes),
                     o.optBoolean("armed", d.armed), o.optBoolean("killSwitch", d.killSwitch), o.optDouble("dailyLossUsdt", d.dailyLossUsdt),
                     o.optInt("maxTradesDay", d.maxTradesDay), o.optInt("lossStreak", d.lossStreak), o.optInt("pauseMin", d.pauseMin), o.optBoolean("early", d.early), o.optInt("leadSec", 10), o.optInt("hoursMask", ALL_HOURS), o.optDouble("maxPriceCents", d.maxPriceCents),
-                    o.optString("stakeMode", d.stakeMode), o.optDouble("edgeUnitPct", d.edgeUnitPct), o.optDouble("stakeCapX", d.stakeCapX), o.optInt("orderTries", d.orderTries))
+                    o.optString("stakeMode", d.stakeMode), o.optDouble("edgeUnitPct", d.edgeUnitPct), o.optDouble("stakeCapX", d.stakeCapX), o.optInt("orderTries", d.orderTries),
+                    o.optDouble("kellyFrac", d.kellyFrac), o.optDouble("kellyCapPct", d.kellyCapPct), o.optDouble("bankroll", d.bankroll))
                 // v2 (2026-11-22): one rule only, P(UP) >= 52% -> UP, <= 48% -> DOWN, every call bet; edge gate off
                 // v3 (2026-11-22): exactly the 1-second backtest that made +$322 in 60 days: 52% rule, call + buy 10 s before the
                 // round start, every call bet ($1, no price check), no daily / streak / trade-count limits, no kill switch
@@ -300,16 +305,12 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
     private val failedTries = HashMap<Long, Int>()
 
     /**
-     * Stake in USDT. flat: the base stake. edge: base x edge / edgeUnitPct, edge = calibrated win rate x (1 - fee) / price - 1, capped at
-     * stakeCapX x base; LIVE floor 1.5 (the exchange minimum). 0 = no edge at this price: no bet. No price known: the base stake.
+     * Stake in USDT (rules in Staking.kt). flat: the base stake. edge / tiers / kelly: sized from the calibrated win rate against the
+     * share price; floor 1.5 in LIVE (the exchange minimum), 0.1 in PAPER. 0 = no edge at this price: no bet.
+     * No price known: the base stake. bankroll = kelly mode only: LIVE = the real Prediction balance, PAPER = cfg.bankroll.
      */
-    fun sizedStake(cfg: Cfg, p: Double, price: Double?, mode: String): Double {
-        if (cfg.stakeMode != "edge" || price == null || !(price > 0.0)) return cfg.stake
-        val edge = p * (1 - PredictionApi.FEE_BPS / 10_000.0) / price - 1
-        if (edge <= 0.0) return 0.0
-        val lo = if (mode == "live") 1.5 else 0.1
-        return (cfg.stake * edge * 100 / cfg.edgeUnitPct).coerceIn(lo, maxOf(lo, cfg.stake * cfg.stakeCapX))
-    }
+    fun sizedStake(cfg: Cfg, p: Double, price: Double?, mode: String, bankroll: Double = cfg.bankroll): Double =
+        Staking.sized(cfg.stakeMode, cfg.stake, p, price, mode == "live", cfg.edgeUnitPct, cfg.stakeCapX, cfg.kellyFrac, cfg.kellyCapPct, bankroll)
 
     /** exchange order status -> "NOT FILLED" / "PARTIAL" / "FILLED"; null = still pending or unknown wording */
     fun classify(status: String?): String? {
@@ -378,9 +379,10 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
                 if (cfg.early) noteMarket(T, now, market.let { if (c.side == "UP") it.up.price else it.down.price })
                 val tok = if (c.side == "UP") market.up else market.down
                 // stake by edge: size the bet from the calibrated win rate against the listed price (the real quote is checked again below)
-                stake = sizedStake(cfg, p, tok.price, mode)
-                if (stake <= 0.0) return skip("stake by edge: no edge at the listed price ${String.format(us, "%.1f", (tok.price ?: 0.0) * 100)} cents", done = false)
-                plan = api.funding(bal, runCatching { api.walletBalance(wallet) }.getOrNull(), stake)
+                val wb = runCatching { api.walletBalance(wallet) }.getOrNull()
+                stake = sizedStake(cfg, p, tok.price, mode, if (mode == "live") api.bankroll(bal, wb) else cfg.bankroll)
+                if (stake <= 0.0) return skip("stake rule (${Staking.title(cfg.stakeMode)}): no bet at the listed price ${String.format(us, "%.1f", (tok.price ?: 0.0) * 100)} cents", done = false)
+                plan = api.funding(bal, wb, stake)
                 if (plan == null && mode == "live") return skip("not enough Prediction balance for ${String.format(us, "%.2f", stake)} USDT")
                 q = api.quote(wallet, tok.tokenId, stake, minOf(market.slippageBps, 200), plan?.source ?: "MPC")
                 if (q.expireAt > 0 && q.expireAt <= api.nowMs()) return Step(false, "quote expired, retrying")
@@ -392,12 +394,12 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
                 // paper falls back to the paper price
                 q = null
                 stake = sizedStake(cfg, p, cfg.paperCents / 100, mode)
-                if (stake <= 0.0) return skip("stake by edge: no edge at the paper price", done = false)
+                if (stake <= 0.0) return skip("stake rule (${Staking.title(cfg.stakeMode)}): no bet at the paper price", done = false)
                 cost = stake; shares = stake * (1 - fee) / (cfg.paperCents / 100); source = "paper price (quote failed: ${m.take(60)})"
             }
         } else {
             stake = sizedStake(cfg, p, cfg.paperCents / 100, mode)
-            if (stake <= 0.0) return skip("stake by edge: no edge at the paper price")
+            if (stake <= 0.0) return skip("stake rule (${Staking.title(cfg.stakeMode)}): no bet at the paper price")
             cost = stake; shares = stake * (1 - fee) / (cfg.paperCents / 100); source = "paper price"
         }
         val price = cost / shares
