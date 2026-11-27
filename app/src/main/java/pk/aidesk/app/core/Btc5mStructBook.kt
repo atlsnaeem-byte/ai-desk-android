@@ -93,9 +93,11 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
     /** share = effective price per share incl. fee (cost / shares); stake = cost. up: 1 / 0 / 2 = tie. */
     class Bet(val id: Long, val mode: String, val T: Long, val side: String, val share: Double, val stake: Double,
               val assumed: Boolean, val auto: Boolean, val up: Int?, val orderId: String?, val status: String, val winP: Double?) {
+        /** false = the exchange killed / failed the order: no shares were bought, so no result and no P&L (see reconcileFills) */
+        val filled get() = status != "NOT FILLED"
         val shares get() = stake / share
-        val win get() = if (up == null || up == 2) null else (up == 1) == (side == "UP")
-        val pnl get() = when (up) { null -> null; 2 -> 0.5 * shares - stake; else -> if (win == true) shares - stake else -stake }
+        val win get() = if (!filled || up == null || up == 2) null else (up == 1) == (side == "UP")
+        val pnl get() = if (!filled) null else when (up) { null -> null; 2 -> 0.5 * shares - stake; else -> if (win == true) shares - stake else -stake }
     }
 
     class Stats(val n: Int, val wins: Int, val pnl: Double, val staked: Double, val open: Int, val maxDd: Double) {
@@ -268,7 +270,7 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
 
     /** null = allowed, else the reason it is blocked. */
     fun riskBlock(cfg: Cfg, mode: String, now: Long): String? {
-        val b = bets().filter { it.mode == mode }
+        val b = bets().filter { it.mode == mode && it.filled }
         val today = b.filter { it.T >= dayStart(now) }
         if (cfg.maxTradesDay > 0 && today.size >= cfg.maxTradesDay) return "max ${cfg.maxTradesDay} trades today reached"
         val dayPnl = today.sumOf { it.pnl ?: 0.0 }
@@ -388,9 +390,35 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         }
     }
 
+    /**
+     * LIVE fill check (2026-11-27). place-order returns an order id for a FOK order even when the exchange then kills it
+     * (order history: "Failed 0.00%"), so an order id is NOT proof of a fill. Every live bet still "OK" is looked up in the
+     * wallet's order list: Failed / cancelled / rejected / expired -> "NOT FILLED" (no shares, no payout: left out of results
+     * and stats); Filled -> "FILLED"; partly filled -> "PARTIAL"; not found or still pending -> unchanged, checked again next loop.
+     */
+    fun reconcileFills(api: PredictionApi, now: Long) {
+        val pend = raw(BETS).filter { it.getString("mode") == "live" && it.optString("orderId").isNotBlank() &&
+            it.optString("status", "OK") == "OK" && now - it.getLong("id") > 15_000 }
+        if (pend.isEmpty()) return
+        val byId = api.orders(api.wallet()).associateBy { it.orderId }
+        val upd = HashMap<Long, String>()
+        for (o in pend) {
+            val s = byId[o.optString("orderId")]?.status?.lowercase() ?: continue
+            val ns = when {
+                listOf("fail", "cancel", "reject", "expire", "kill", "unfill", "refund").any { s.contains(it) } -> "NOT FILLED"
+                s.contains("partial") -> "PARTIAL"
+                s.contains("fill") -> "FILLED"
+                else -> null
+            }
+            if (ns != null) upd[o.getLong("id")] = ns
+        }
+        if (upd.isEmpty()) return
+        synchronized(this) { saveBets(raw(BETS).onEach { o -> upd[o.getLong("id")]?.let { o.put("status", it) } }) }
+    }
+
     // ------------------------------------------------------------------ stats
     fun stats(mode: String, since: Long = 0L): Stats {
-        val b = bets().filter { it.mode == mode && it.T >= since }
+        val b = bets().filter { it.mode == mode && it.T >= since && it.filled }
         val done = b.filter { it.pnl != null }.sortedBy { it.T }
         var eq = 0.0; var peak = 0.0; var dd = 0.0
         for (x in done) { eq += x.pnl ?: 0.0; peak = maxOf(peak, eq); dd = maxOf(dd, peak - eq) }

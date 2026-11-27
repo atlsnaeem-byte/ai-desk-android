@@ -369,6 +369,7 @@ class TraderService : Service() {
                         val wait = (api.nowMs() / R0) * R0 + 6_000L - api.nowMs()
                         if (wait in 1..60_000) { structTicks.value = System.currentTimeMillis(); delay(wait) }
                     }
+                    if (pred != null) runCatching { book.reconcileFills(pred, api.nowMs()) }    // killed (FOK) orders are not bets
                     runCatching { book.settle(api) }
                     if (cfg.mode == "live" && pred != null) runCatching { pred.claimAll(pred.wallet()) }
                     structTicks.value = System.currentTimeMillis()

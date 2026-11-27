@@ -435,8 +435,8 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     T("${hhmm(b.T)}–${hhmm(b.T + rm)}", 11.sp, C.Txt, mono = true); HGap(6.dp)
                     T(b.mode.uppercase(), 10.sp, if (b.mode == "live") C.Green else C.Blue, FontWeight.Bold); HGap(6.dp)
-                    T("${b.side} @${String.format(us, "%.1f", b.share * 100)}¢ · ${f2(b.stake)}" + (if (b.status != "OK") " · ${b.status}" else ""),
-                        11.sp, if (b.status != "OK") C.Amber else sideCol(b.side), mono = true, modifier = Modifier.weight(1f))
+                    T("${b.side} @${String.format(us, "%.1f", b.share * 100)}¢ · ${f2(b.stake)}" + (if (b.status != "OK" && b.status != "FILLED") " · ${b.status}" else ""),
+                        11.sp, if (b.status != "OK" && b.status != "FILLED") C.Amber else sideCol(b.side), mono = true, modifier = Modifier.weight(1f))
                     val p = b.pnl
                     T(when { p != null -> String.format(us, "%+.2f", p); b.up == null && nowMs < b.T + rm -> "OPEN"; else -> "settling…" },
                         11.sp, when { p == null -> C.Amber; p >= 0 -> C.Green; else -> C.Red }, FontWeight.Bold, mono = true)
