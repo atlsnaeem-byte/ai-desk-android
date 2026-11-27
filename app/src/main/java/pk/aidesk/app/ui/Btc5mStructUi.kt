@@ -470,10 +470,11 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
             "edge" -> "Stake = base stake x edge / ${cfg.edgeUnitPct.toInt()}%, at most ${cfg.stakeCapX.toInt()}x the base (LIVE minimum 1.5 USDT). " +
                 "Edge = backtest win rate x 0.98 / share price - 1, so a cheaper share gets a bigger bet and no edge = no bet. Early backtest only: test it on PAPER first."
             "tiers" -> "Stake by edge size: below 0% no bet, 0-5% half the base stake, 5-10% the base stake, 10% or more double (LIVE minimum 1.5 USDT, so " +
-                "use a base of 3 or more for the half tier to be smaller). Backtest Nov 2026: +\$303 per \$1 base vs flat-every-call -\$30 (prices partly simulated)."
+                "use a base of 3 or more for the half tier to be smaller). Real-price test (Mar-Nov 2026 sample): ETH 1s about break-even, ETH 5m and BTC 5m lost money. Paper first."
             "kelly" -> "Stake = ${(cfg.kellyFrac * 100).toInt()}% of the Kelly stake x bankroll, at most ${String.format(US, "%.0f", cfg.kellyCapPct)}% of the bankroll per bet " +
                 "(bankroll = your real Prediction balance in LIVE, the paper bankroll above in PAPER; LIVE minimum 1.5 USDT). The base stake is not used. " +
-                "Biggest P&L in the backtest but also the biggest swings: stakes follow the balance, so they shrink after losses and grow after wins."
+                "It sizes bets, it does not create an edge: on real prices (4,000-6,000 sampled rounds per market, Mar-Nov 2026) ETH 1s was about break-even " +
+                "(+0.6% ROI, not significant), ETH 5m -3% and BTC 5m -5%. Biggest swings of all methods. Paper only until real quotes show a profit."
             else -> "Flat: every bet is the base stake."
         }, 10.sp, C.Dim)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -483,7 +484,8 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         }
         T("S4 backtest settings (default for the ETH 1-second market): every round is a call (50% rule), bet only when the win rate beats the share price, " +
             "quarter-Kelly stake capped at 4% of the bankroll, no price cap, all hours. Best ROI mix: min edge 5%, max price 60 cents, stake by edge. " +
-            "You can still change each setting above.", 10.sp, C.Dim)
+            "Simulated-price backtests looked profitable, but on REAL Polymarket prices none of these rules beat break-even with confidence " +
+            "(ETH 1s about 0%, ETH 5m and BTC 5m negative): keep them on PAPER and watch real results.", 10.sp, C.Dim)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("LIVE orders per round", 11.sp, C.Muted)
             for (n in listOf(1, 2, 3, 5)) Pill(if (n == 1) "1 (no retry)" else "$n", C.Blue, filled = cfg.orderTries == n) { vm.saveStructCfg(cfg.copy(orderTries = n)) }
