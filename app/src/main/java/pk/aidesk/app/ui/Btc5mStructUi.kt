@@ -454,15 +454,16 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
                     T("${b.side} @${String.format(us, "%.1f", b.share * 100)}¢ · ${f2(b.stake)}" + (if (b.status != "OK" && b.status != "FILLED") " · ${b.status}" else ""),
                         11.sp, if (b.status != "OK" && b.status != "FILLED") C.Amber else sideCol(b.side), mono = true, modifier = Modifier.weight(1f))
                     val p = b.pnl
-                    T(when { p != null -> String.format(us, "%+.2f", p); b.up == null && nowMs < b.T + rm -> "OPEN"; else -> "settling…" },
-                        11.sp, when { p == null -> C.Amber; p >= 0 -> C.Green; else -> C.Red }, FontWeight.Bold, mono = true)
+                    T(when { !b.filled -> "not filled"; p != null -> String.format(us, "%+.2f", p); b.up == null && nowMs < b.T + rm -> "OPEN"; else -> "settling…" },
+                        11.sp, when { !b.filled -> C.Muted; p == null -> C.Amber; p >= 0 -> C.Green; else -> C.Red }, FontWeight.Bold, mono = true)
                     HGap(8.dp)
                     T("✕", 11.sp, C.Dim, modifier = Modifier.clickable { vm.deleteStructBet(b.id) })
                 }
                 val placed = java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss").withZone(pk.aidesk.app.core.Engine.PKT)
                     .format(java.time.Instant.ofEpochMilli(b.id))
                 T("bet placed $placed · " + when {
-                    b.pnl != null -> "${if (b.up == 2) "TIE" else if (b.win == true) "WIN" else "LOSS"} · settled"
+                    !b.filled -> "the exchange killed this order (Failed, 0% filled): nothing was bought, no money spent, not counted in the results"
+                    b.pnl != null ->"${if (b.up == 2) "TIE" else if (b.win == true) "WIN" else "LOSS"} · settled"
                     nowMs < b.T -> "round starts in ${mmss(b.T - nowMs)}"
                     nowMs < b.T + rm -> "result in ${mmss(b.T + rm - nowMs)}"
                     else -> "round ended, result in a few seconds"
