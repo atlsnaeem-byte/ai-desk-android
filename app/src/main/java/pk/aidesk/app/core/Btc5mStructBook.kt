@@ -71,6 +71,10 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
                 return z.hour / 4 + if (wk) 6 else 0
             }
             fun label(T: Long) = (if (bit(T) >= 6) "weekend " else "weekday ") + BLOCKS[bit(T) % 6] + " PKT"
+            /** The exact rules of backtest method S4 (ETH 1-second model, Nov 2026 and 2 years): call every round (50% rule), bet only when the
+             *  calibrated win rate beats the share price (edge > 0, no price cap, no hour filter), quarter-Kelly stake capped at 4% of the bankroll. */
+            fun s4Backtest(c: Cfg) = c.copy(stakeMode = "kelly", kellyFrac = 0.25, kellyCapPct = 4.0, bankroll = 100.0, thrPct = 50.0,
+                minEdgePct = 0.0, minP = 0.0, maxPriceCents = 0.0, hoursMask = ALL_HOURS, early = false)
             fun of(o: JSONObject?): Cfg {
                 if (o == null) return Cfg()
                 val d = Cfg()
@@ -119,7 +123,8 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
     private val STATUS = "${mk.prefix}_status.json"
     /** a market never set up starts with auto OFF (only BTC 5m keeps its old default: on) */
     fun cfg(): Cfg {
-        val c = store.readObj(CFG)?.let { Cfg.of(it) } ?: Cfg(auto = mk.id == Btc5mStruct.BTC5.id, windowSec = if (mk.s1) 45 else 20)
+        val c = store.readObj(CFG)?.let { Cfg.of(it) }
+            ?: Cfg(auto = mk.id == Btc5mStruct.BTC5.id, windowSec = if (mk.s1) 45 else 20).let { if (mk.s1) Cfg.s4Backtest(it) else it }   // 1-second ETH market starts on the S4 backtest settings
         return if (mk.s1 && c.early) c.copy(early = false) else c        // the 1-second model calls 10 s AFTER the start
     }
     fun saveCfg(c: Cfg) = store.writeObj(CFG, c.json())

@@ -478,9 +478,12 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         }, 10.sp, C.Dim)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("Preset", 11.sp, C.Muted)
-            Pill("Best backtest mix", C.Green) { vm.saveStructCfg(cfg.copy(minEdgePct = 5.0, minP = 0.0, maxPriceCents = 60.0, stakeMode = "edge")) }
+            Pill("S4 backtest settings", C.Green) { vm.saveStructCfg(Btc5mStructBook.Cfg.s4Backtest(cfg)) }
+            Pill("Best ROI mix", C.Green) { vm.saveStructCfg(cfg.copy(minEdgePct = 5.0, minP = 0.0, maxPriceCents = 60.0, stakeMode = "edge")) }
         }
-        T("One tap: min edge 5%, max price 60 cents, stake by edge (the best ROI in the Nov 2026 and 2-year backtest). You can still change each setting above.", 10.sp, C.Dim)
+        T("S4 backtest settings (default for the ETH 1-second market): every round is a call (50% rule), bet only when the win rate beats the share price, " +
+            "quarter-Kelly stake capped at 4% of the bankroll, no price cap, all hours. Best ROI mix: min edge 5%, max price 60 cents, stake by edge. " +
+            "You can still change each setting above.", 10.sp, C.Dim)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             T("LIVE orders per round", 11.sp, C.Muted)
             for (n in listOf(1, 2, 3, 5)) Pill(if (n == 1) "1 (no retry)" else "$n", C.Blue, filled = cfg.orderTries == n) { vm.saveStructCfg(cfg.copy(orderTries = n)) }

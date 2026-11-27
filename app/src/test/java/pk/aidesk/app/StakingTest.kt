@@ -86,6 +86,18 @@ class StakingTest {
     }
 
     @Test
+    fun s4PresetIsTheBacktestRules() {
+        val d = Btc5mStructBook.Cfg(thrPct = 60.0, minEdgePct = 5.0, maxPriceCents = 60.0, hoursMask = Btc5mStructBook.Cfg.SKIP_WEAK, early = true, stakeMode = "flat")
+        val s = Btc5mStructBook.Cfg.s4Backtest(d)
+        assertEquals("kelly", s.stakeMode); assertEquals(0.25, s.kellyFrac, 0.0); assertEquals(4.0, s.kellyCapPct, 0.0); assertEquals(100.0, s.bankroll, 0.0)
+        assertEquals(50.0, s.thrPct, 0.0); assertEquals(0.0, s.minEdgePct, 0.0); assertEquals(0.0, s.minP, 0.0); assertEquals(0.0, s.maxPriceCents, 0.0)
+        assertTrue(s.allHours); assertTrue(!s.early)
+        // a call at 50% confidence is taken (every round), and the stake there is the backtest S4 unit
+        assertEquals(50.0, s.thr * 100, 1e-9)
+        assertEquals(Staking.raw("kelly", 1.0, 0.62, 0.55, 10.0, 3.0, 0.25, 4.0, 100.0), Staking.sized("kelly", s.stake, 0.62, 0.55, false, s.edgeUnitPct, s.stakeCapX, s.kellyFrac, s.kellyCapPct, s.bankroll), 1e-12)
+    }
+
+    @Test
     fun bankrollIsTheLargestSpendableBalance() {
         val api = PredictionApi("k", "s")
         val bal = listOf(PredictionApi.Balance("SPOT", 40.0, true), PredictionApi.Balance("FUNDING", 90.0, true), PredictionApi.Balance("CeDeFi", 12.0, true))
