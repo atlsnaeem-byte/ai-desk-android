@@ -3,6 +3,7 @@ package pk.aidesk.app.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,6 +40,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -123,7 +125,7 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
         T("Price to beat ${px(c.open)} → now ${px(c.price)} (${String.format(US, "%+.1f", c.moveBps)} bps)",
             12.sp, if (c.price >= c.open) C.Green else C.Red)
         Gap(6.dp)
-        StructChart(c, livePx)
+        StructChart(c, livePx, bv?.takeIf { it.mk == c0mk }?.rounds ?: emptyList(), bv?.takeIf { it.mk == c0mk }?.bets ?: emptyList())
         Gap(6.dp)
         // structure on each timeframe
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -188,7 +190,7 @@ fun StructCallCard(vm: AppVM, act: MainActivity, now: Long) {
 }
 
 @Composable
-private fun StructChart(c: Btc5mStruct.Call, livePx: Double?) {
+private fun StructChart(c: Btc5mStruct.Call, livePx: Double?, rounds: List<Btc5mStructBook.RoundRow>, bets: List<Btc5mStructBook.Bet>) {
     // the forming candle follows the 1 s live price; the high/low only widen
     var hi by remember(c.roundStart) { mutableStateOf(c.forming5?.get(1) ?: Double.NaN) }
     var lo by remember(c.roundStart) { mutableStateOf(c.forming5?.get(2) ?: Double.NaN) }
@@ -198,30 +200,71 @@ private fun StructChart(c: Btc5mStruct.Call, livePx: Double?) {
         lo = minOf(if (lo.isNaN()) f[2] else lo, f[2], px)
     }
     val form = c.forming5?.let { doubleArrayOf(it[0], hi, lo, px) }
-    Canvas(Modifier.fillMaxWidth().height(260.dp).clip(RoundedCornerShape(10.dp)).background(C.Bg)) { drawStruct(c, form, px) }
+    // how many candles are on screen, and how far the chart is scrolled back (in candles) from the newest one
+    var show by remember { mutableStateOf(24) }
+    var back by remember(c.mk.id) { mutableStateOf(0f) }
+    val n = c.bars5.size
+    val maxBack = max(0, n - show).toFloat()
+    val backI = back.coerceIn(0f, maxBack).toInt()
+    Canvas(Modifier.fillMaxWidth().height(310.dp).clip(RoundedCornerShape(10.dp)).background(C.Bg)
+        .pointerInput(show, n) {
+            detectHorizontalDragGestures { change, dragAmount ->
+                change.consume()
+                val stepPx = size.width / (show + 2f)
+                back = (back + dragAmount / stepPx).coerceIn(0f, max(0, n - show).toFloat())
+            }
+        }) { drawStruct(c, form, px, rounds, bets, show, backI) }
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Pill("◀ older", C.Blue) { back = (back + show / 2f).coerceAtMost(maxBack) }
+        Pill("newer ▶", C.Blue) { back = (back - show / 2f).coerceAtLeast(0f) }
+        Pill("Now", C.Amber, filled = backI == 0) { back = 0f }
+        Box(Modifier.weight(1f))
+        T("candles", 10.sp, C.Muted)
+        for (z in listOf(12, 24, 48)) Pill("$z", C.Blue, filled = show == z) { show = z }
+    }
+    val end = n - backI; val first = max(0, end - min(show, end))
+    if (end > 0 && n > 0) {
+        val fmt = java.time.format.DateTimeFormatter.ofPattern("d MMM HH:mm").withZone(pk.aidesk.app.core.Engine.PKT)
+        val t0 = c.bars5.t[first]; val t1 = c.bars5.t[end - 1] + c.bars5.tfMin * 60_000L
+        T("Showing ${fmt.format(java.time.Instant.ofEpochMilli(t0))} → ${fmt.format(java.time.Instant.ofEpochMilli(t1))} (PKT) · drag the chart sideways to go back", 10.sp, C.Muted)
+        val vis = rounds.filter { it.T in t0 until t1 && it.side != "NONE" }
+        val vb = bets.filter { it.T in t0 until t1 && it.filled }
+        T("In view: bot calls ${vis.count { it.win == true }} won · ${vis.count { it.win == false }} lost" +
+            (if (vb.isNotEmpty()) " | bets ${vb.count { it.win == true }} won · ${vb.count { it.win == false }} lost" else ""), 11.sp, C.Txt, FontWeight.SemiBold)
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        T("▲▼ bot call", 10.sp, C.Muted)
+        T("green = won", 10.sp, C.Green)
+        T("red = lost", 10.sp, C.Red)
+        T("amber = waiting", 10.sp, C.Amber)
+        T("◯ ring = bet (white live, blue paper)", 10.sp, C.Muted)
+    }
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         T("━ beat ${px(c.open)}", 10.sp, C.Amber)
-        T("▮ live ${c.mk.roundMin}m candle", 10.sp, C.Muted)
-        T("▮ AI projected ${c.mk.roundMin}m: ${if (c.projClose >= c.open) "UP" else "DOWN"} ${px(c.projClose)}", 10.sp, if (c.projClose >= c.open) C.Green else C.Red)
+        T("▮ live ${c.mk.roundMin}m candle ${hhmm(c.roundStart)}", 10.sp, C.Muted)
+        T("▮ AI projected for the SAME round: ${if (c.projClose >= c.open) "UP" else "DOWN"} ${px(c.projClose)}", 10.sp, if (c.projClose >= c.open) C.Green else C.Red)
     }
 }
 
-private fun DrawScope.drawStruct(c: Btc5mStruct.Call, form: DoubleArray?, livePx: Double) {
+private fun DrawScope.drawStruct(c: Btc5mStruct.Call, form: DoubleArray?, livePx: Double, rounds: List<Btc5mStructBook.RoundRow>,
+                                 bets: List<Btc5mStructBook.Bet>, showN: Int, back: Int) {
     val b = c.bars5
     val n = b.size
     if (n < 5) return
-    val show = min(36, n)
-    val start = n - show
-    val slots = show + 2                                     // + forming candle + AI projection
-    val axisW = 58.dp.toPx(); val padT = 14.dp.toPx(); val padB = 16.dp.toPx()
+    val end = n - back                                       // exclusive: the last candle on screen is end - 1
+    val show = min(showN, end)
+    val start = end - show
+    val live = back == 0                                     // newest edge: + forming candle + AI projection of the same round
+    val slots = show + (if (live) 2 else 0)
+    val axisW = 58.dp.toPx(); val padT = 16.dp.toPx(); val padB = 36.dp.toPx()
     val W = size.width - axisW; val H = size.height - padT - padB
     val step = W / slots
     fun x(i: Int) = ((i - start) + 0.5f) * step
-    val f = form
+    val f = if (live) form else null
     var lo = Double.MAX_VALUE; var hi = -Double.MAX_VALUE
-    for (i in start until n) { lo = min(lo, b.l[i]); hi = max(hi, b.h[i]) }
+    for (i in start until end) { lo = min(lo, b.l[i]); hi = max(hi, b.h[i]) }
     f?.let { lo = min(lo, it[2]); hi = max(hi, it[1]) }
-    lo = min(lo, c.projLow); hi = max(hi, c.projHigh)
+    if (live) { lo = min(lo, c.projLow); hi = max(hi, c.projHigh) }
     val pad = (hi - lo) * 0.08 + 1e-9; lo -= pad; hi += pad
     fun y(v: Double) = (padT + (1 - (v - lo) / (hi - lo)) * H).toFloat()
     val paint = android.graphics.Paint().apply { isAntiAlias = true; textSize = 9.sp.toPx() }
@@ -230,12 +273,44 @@ private fun DrawScope.drawStruct(c: Btc5mStruct.Call, form: DoubleArray?, livePx
         paint.textAlign = if (center) android.graphics.Paint.Align.CENTER else android.graphics.Paint.Align.LEFT
         drawIntoCanvas { it.nativeCanvas.drawText(s, xx, yy, paint) }
     }
+    /** text rotated to read bottom-to-top, starting at (xx, yy) and centred on xx: a time label under a candle */
+    fun upText(s: String, xx: Float, yy: Float, col: Color, bold: Boolean = false) {
+        paint.color = col.toArgb(); paint.isFakeBoldText = bold; paint.textAlign = android.graphics.Paint.Align.LEFT
+        drawIntoCanvas { val cv = it.nativeCanvas; cv.save(); cv.rotate(-90f, xx, yy); cv.drawText(s, xx, yy + 3.5.dp.toPx(), paint); cv.restore() }
+    }
+    fun tri(xc: Float, yc: Float, r: Float, up: Boolean, col: Color) {
+        val p = androidx.compose.ui.graphics.Path()
+        if (up) { p.moveTo(xc, yc - r); p.lineTo(xc - r, yc + r); p.lineTo(xc + r, yc + r) } else { p.moveTo(xc, yc + r); p.lineTo(xc - r, yc - r); p.lineTo(xc + r, yc - r) }
+        p.close(); drawPath(p, col)
+    }
     for (k in 0..4) {
         val v = lo + (hi - lo) * k / 4
         drawLine(C.Border.copy(alpha = 0.45f), Offset(0f, y(v)), Offset(W, y(v)), 1f)
         text(px(v), W + 4.dp.toPx(), y(v) + 3.dp.toPx(), C.Dim)
     }
-    for (i in start until n) if ((b.t[i] / (b.tfMin * 60_000L)) % 6 == 0L) text(hhmm(b.t[i]), x(i), size.height - 3.dp.toPx(), C.Dim, center = true)
+    // round results: a tinted column behind each candle the bot called (green won / red lost / amber waiting), call arrow + bet ring at the top
+    val rmap = rounds.associateBy { it.T }
+    val bmap = bets.groupBy { it.T }
+    val topY = padT + 8.dp.toPx()
+    for (i in start until end) {
+        val r = rmap[b.t[i]] ?: continue
+        if (r.side == "NONE") continue
+        val col = when (r.win) { true -> C.Green; false -> C.Red; null -> C.Amber }
+        drawRect(col.copy(alpha = 0.14f), Offset(x(i) - step / 2, padT), Size(step, H))
+        tri(x(i), topY, 3.5.dp.toPx(), r.side == "UP", col)
+        bmap[b.t[i]]?.let { bl ->
+            val ring = if (bl.any { it.mode == "live" && it.filled }) C.Txt else if (bl.any { it.filled }) C.Blue else C.Dim
+            drawCircle(ring, 7.dp.toPx(), Offset(x(i), topY), style = Stroke(1.4.dp.toPx()))
+        }
+        if (step >= 11.dp.toPx() && r.win != null) text(if (r.win == true) "W" else "L", x(i), topY + 19.dp.toPx(), col, bold = true, center = true)
+    }
+    // a time under EVERY 5 m candle (every k-th one when they are too narrow), newest always labelled
+    val k = max(1, kotlin.math.ceil(11.dp.toPx() / step).toInt())
+    for (i in start until end) {
+        val on = (end - 1 - i) % k == 0
+        drawLine(C.Border, Offset(x(i), padT + H), Offset(x(i), padT + H + (if (on) 4 else 2).dp.toPx()), 1f)
+        if (on) upText(hhmm(b.t[i]), x(i), size.height - 2.dp.toPx(), C.Dim)
+    }
     val bw = max(2f, step * 0.62f)
     fun candle(xc: Float, o: Double, h: Double, l: Double, cl: Double, alpha: Float) {
         val col = (if (cl >= o) C.Green else C.Red).copy(alpha = alpha)
@@ -243,38 +318,45 @@ private fun DrawScope.drawStruct(c: Btc5mStruct.Call, form: DoubleArray?, livePx
         val top = y(max(o, cl)); val bot = y(min(o, cl))
         drawRect(col, Offset(xc - bw / 2, top), Size(bw, max(1.5f, bot - top)))
     }
-    for (i in start until n) candle(x(i), b.o[i], b.h[i], b.l[i], b.c[i], 1f)
+    for (i in start until end) candle(x(i), b.o[i], b.h[i], b.l[i], b.c[i], 1f)
     if (f != null) candle(x(n), f[0], f[1], f[2], f[3], 1f)
     // swings with HH / HL / LH / LL labels (5m)
     for (s in c.tf.getValue(c.mk.tf).swings) {
-        if (s.i < start) continue
+        if (s.i < start || s.i >= end) continue
         val col = when (s.label) { "HH", "HL" -> C.Green; "LH", "LL" -> C.Red; else -> C.Muted }
         val yy = y(s.price)
         drawCircle(col, 2.5.dp.toPx(), Offset(x(s.i), if (s.high) yy - 3.dp.toPx() else yy + 3.dp.toPx()))
         if (s.label.isNotEmpty()) text(s.label, x(s.i), if (s.high) yy - 7.dp.toPx() else yy + 13.dp.toPx(), col, bold = true, center = true)
     }
+    if (!live) {
+        text("older candles · tap Now to return to the live round", 4.dp.toPx(), padT - 4.dp.toPx(), C.Amber, bold = true)
+        return
+    }
     // price to beat + live price
     val dash = PathEffect.dashPathEffect(floatArrayOf(10f, 8f))
     drawLine(C.Amber, Offset(0f, y(c.open)), Offset(W, y(c.open)), 1.2.dp.toPx(), pathEffect = dash)
     text("beat ${px(c.open)}", 4.dp.toPx(), y(c.open) - 3.dp.toPx(), C.Amber, bold = true)
-    // live price line + tag on the axis (moves every second)
     val yl = y(livePx)
     drawLine(C.Txt.copy(alpha = 0.45f), Offset(0f, yl), Offset(W, yl), 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 6f)))
     val lcol = if (livePx >= c.open) C.Green else C.Red
     drawRect(lcol, Offset(W + 1.dp.toPx(), yl - 7.dp.toPx()), Size(axisW - 2.dp.toPx(), 14.dp.toPx()))
     text(px(livePx), W + 4.dp.toPx(), yl + 3.dp.toPx(), C.Bg, bold = true)
-    // AI projected 5m candle: solid, coloured by its projected direction (green up / red down), min body so the colour shows
+    // THIS round = the forming candle + the AI projection of the same round, bracketed and labelled with its time
     val xp = x(n + 1)
     val pcol = if (c.projClose >= c.open) C.Green else C.Red
     val pw = bw * 1.15f
-    drawRect(pcol.copy(alpha = 0.12f), Offset(xp - step / 2, padT), Size(step, H))
+    drawRect(C.Amber.copy(alpha = 0.10f), Offset(x(n) - step / 2, padT), Size(step * 2, H))
+    drawRect(C.Amber, Offset(x(n) - step / 2, padT), Size(step * 2, H), style = Stroke(1.dp.toPx(), pathEffect = dash))
+    text("THIS ROUND ${hhmm(c.roundStart)}–${hhmm(c.roundStart + c.roundMs)}", x(n) + step / 2, padT - 4.dp.toPx(), C.Amber, bold = true, center = true)
+    upText("NOW " + hhmm(c.roundStart), x(n), size.height - 2.dp.toPx(), C.Amber, bold = true)
+    upText("AI " + hhmm(c.roundStart), xp, size.height - 2.dp.toPx(), pcol, bold = true)
     drawLine(pcol, Offset(xp, y(c.projHigh)), Offset(xp, y(c.projLow)), 2f)
     var top = y(max(c.open, c.projClose)); var bot = y(min(c.open, c.projClose))
     val minH = 8.dp.toPx()
     if (bot - top < minH) { val mid = (top + bot) / 2; top = mid - minH / 2; bot = mid + minH / 2 }
     drawRect(pcol.copy(alpha = 0.85f), Offset(xp - pw / 2, top), Size(pw, bot - top))
     drawRect(C.Txt, Offset(xp - pw / 2, top), Size(pw, bot - top), style = Stroke(1.2f, pathEffect = dash))
-    text(if (c.projClose >= c.open) "AI ▲" else "AI ▼", xp, padT - 3.dp.toPx(), pcol, bold = true, center = true)
+    text(if (c.projClose >= c.open) "AI ▲" else "AI ▼", xp, padT + 11.dp.toPx(), pcol, bold = true, center = true)
 }
 /** Settings + paper / live record for the structure AI. */
 @Composable
