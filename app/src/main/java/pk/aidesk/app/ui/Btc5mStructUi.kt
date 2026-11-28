@@ -542,9 +542,10 @@ fun StructRecordCard(vm: AppVM, act: MainActivity) {
         stat("Live today", bv.liveToday)
         stat("Live all", bv.live)
         KV("All calls (rounds)", if (bv.calls.first > 0) "${bv.calls.second}/${bv.calls.first} right (${String.format(us, "%.1f", 100.0 * bv.calls.second / bv.calls.first)}%)" else "none yet")
-        T("Prices include the 2% fee. Break-even win rate = price paid per share. Paper uses real Binance quotes when a " +
-            "Prediction key is saved (no order is sent), else the paper price. Settled from Binance spot (the market uses Chainlink; " +
-            "near-ties can differ); a tie pays half.", 10.sp, C.Dim)
+        T("Prices include the 2% fee. Break-even win rate = price paid per share. Paper uses a real Binance quote for every bet when a " +
+            "Prediction key is saved (no order is sent); if no real quote can be had the paper bet is skipped, never priced at an assumed " +
+            "price (without a key bets are marked ASSUMED). Results = the real Polymarket result; if it is late, a Binance estimate is shown " +
+            "first and replaced by the real result as soon as it is published (checked for 48 h).", 10.sp, C.Dim)
         Gap(8.dp)
         val bets = if (showAll) bv.bets.take(300) else bv.bets.take(10)
         if (bets.isNotEmpty()) {

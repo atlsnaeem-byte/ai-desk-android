@@ -11,7 +11,7 @@ import org.json.JSONObject
  *   -> EV gate: p >= min p AND (p * shares - cost) / cost >= min edge (cost = amountIn + 2 % fee)
  *   -> hard risk limits (kill switch, daily loss, max trades/day, loss-streak pause) -> execute.
  * Only the last step differs: LIVE places a Binance Prediction order, PAPER records the same fill without ordering.
- * Without an API key, PAPER prices the fill at the "paper price" + 2 % fee.
+ * PAPER prices every bet at a REAL quote (2026-11-28); only without an API key is the "paper price" used, and those bets are marked assumed.
  * LIVE safety: the round is marked as traded BEFORE the order is sent; a definite 4xx rejection unmarks it;
  * an unknown outcome keeps it marked, so a round can never be bought twice.
  * Settlement: Binance spot 1m bars (proxy for the market's Chainlink price): UP if close > open, DOWN if close < open,
@@ -236,10 +236,17 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
      * Polymarket Up wins ties (">="), so there is no tie any more.
      */
     fun settle(api: Binance, now: Long = api.nowMs()) {
+        // 2026-11-28: a result computed from Binance is only PROVISIONAL. Polymarket often publishes its result later than 3 min, and the
+        // Binance calc disagreed with the real result on ~7% of rounds, so provisional rows are re-checked against the market for 48 h
+        // and corrected (bets included) as soon as the real result is out.
+        val provisional = (raw(ROUNDS) + raw(BETS)).filter { it.has("up") && it.optString("src") != "market" && it.getLong("T") > now - 48 * 3_600_000L }
+            .map { it.getLong("T") }.filter { (recheckAt[it] ?: 0L) <= now }.toSortedSet().toList().takeLast(10)
+        provisional.forEach { recheckAt[it] = now + 120_000L }
         val pending = (raw(ROUNDS).filter { !it.has("up") }.map { it.getLong("T") } + raw(BETS).filter { !it.has("up") }.map { it.getLong("T") })
             .filter { it + mk.round + 5_000 <= now }.toSortedSet()
-        if (pending.isEmpty()) return
+        if (pending.isEmpty() && provisional.isEmpty()) return
         val res = HashMap<Long, Int>(); val src = HashMap<Long, String>()
+        for (T in provisional) realResult(T)?.let { res[T] = it; src[T] = "market" }
         for (T in pending.toList().takeLast(200)) {
             val real = realResult(T)
             if (real != null) { res[T] = real; src[T] = "market"; continue }
@@ -260,10 +267,22 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
             }
             src[T] = if (twap) "binance TWAP calc" else "binance close"
         }
+        if (res.isEmpty()) return
         synchronized(this) {
-            saveRounds(raw(ROUNDS).onEach { o -> if (!o.has("up")) res[o.getLong("T")]?.let { o.put("up", it); o.put("src", src[o.getLong("T")]) } })
-            saveBets(raw(BETS).onEach { o -> if (!o.has("up")) res[o.getLong("T")]?.let { o.put("up", it); o.put("src", src[o.getLong("T")]) } })
+            // a market result always wins; a Binance calc only fills a row that has no result yet
+            fun apply(o: JSONObject) {
+                val T = o.getLong("T"); val r = res[T] ?: return; val s = src[T]
+                if (replaceResult(o.has("up"), o.optString("src"), s)) { o.put("up", r); o.put("src", s) }
+            }
+            saveRounds(raw(ROUNDS).onEach { apply(it) })
+            saveBets(raw(BETS).onEach { apply(it) })
         }
+    }
+    private val recheckAt = HashMap<Long, Long>()
+    companion object {
+        /** Should a new result replace the stored one? No result yet: yes. A real market result replaces a Binance estimate; a Binance
+         *  estimate never replaces anything; a market result is final. */
+        fun replaceResult(hasUp: Boolean, curSrc: String?, newSrc: String?) = !hasUp || (newSrc == "market" && curSrc != "market")
     }
 
     /** Real result of the round from Polymarket's public API: 1 = Up, 0 = Down, null = not settled yet / not found. */
@@ -389,23 +408,26 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
                 if (stake <= 0.0) return skip("stake rule (${Staking.title(cfg.stakeMode)}): no bet at the listed price ${String.format(us, "%.1f", (tok.price ?: 0.0) * 100)} cents", done = false)
                 plan = api.funding(bal, wb, stake)
                 if (plan == null && mode == "live") return skip("not enough Prediction balance for ${String.format(us, "%.2f", stake)} USDT")
-                q = api.quote(wallet, tok.tokenId, stake, minOf(market.slippageBps, 200), plan?.source ?: "MPC")
+                // PAPER (2026-11-28): always a REAL quote. The exchange refuses quotes above the balance ("enough USDT") or below its
+                // minimum ("too small"), so paper asks for a quote it can get (balance-limited, at least 1.5 USDT) and uses that real
+                // price per share for its paper stake. No real quote = no paper bet (retried inside the window), never an assumed price.
+                val qAmt = if (mode == "live") stake else Staking.paperQuoteAmount(stake, api.bankroll(bal, wb))
+                val qPlan = if (mode == "live") plan else api.funding(bal, wb, qAmt)
+                q = api.quote(wallet, tok.tokenId, qAmt, minOf(market.slippageBps, 200), qPlan?.source ?: "MPC")
                 if (q.expireAt > 0 && q.expireAt <= api.nowMs()) return Step(false, "quote expired, retrying")
                 if (!(q.shares > 0)) return Step(false, "quote returned no shares, retrying")
-                cost = q.cost; shares = q.shares; source = "quote"
+                if (mode == "live" || kotlin.math.abs(qAmt - stake) < 1e-9) { cost = q.cost; shares = q.shares; source = "quote" }
+                else { cost = stake; shares = stake * q.shares / q.cost; source = "real quote for ${String.format(us, "%.2f", qAmt)} USDT, same price per share" }
             } catch (e: Exception) {
                 val m = (e as? BinanceException)?.msg ?: e.message ?: e.javaClass.simpleName
                 if (mode == "live") return Step(false, "quote failed: $m")
-                // paper falls back to the paper price
-                q = null
-                stake = sizedStake(cfg, p, cfg.paperCents / 100, mode)
-                if (stake <= 0.0) return skip("stake rule (${Staking.title(cfg.stakeMode)}): no bet at the paper price", done = false)
-                cost = stake; shares = stake * (1 - fee) / (cfg.paperCents / 100); source = "paper price (quote failed: ${m.take(60)})"
+                return skip("PAPER: no real quote (${m.take(60)}): not bet, retrying", done = false)
             }
         } else {
             stake = sizedStake(cfg, p, cfg.paperCents / 100, mode)
             if (stake <= 0.0) return skip("stake rule (${Staking.title(cfg.stakeMode)}): no bet at the paper price")
-            cost = stake; shares = stake * (1 - fee) / (cfg.paperCents / 100); source = "paper price"
+            cost = stake; shares = stake * (1 - fee) / (cfg.paperCents / 100)
+            source = "ASSUMED paper price ${cfg.paperCents.toInt()}c (no Prediction API key or real quotes off): not a real price"
         }
         val price = cost / shares
         val edge = (p * shares - cost) / cost * 100
@@ -421,7 +443,7 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
         }
 
         if (mode == "paper") {
-            addBet("paper", T, c.side, price * 100, cost, auto = true, winP = p)
+            addBet("paper", T, c.side, if (q == null) null else price * 100, cost, auto = true, winP = p)   // null = assumed price (flagged)
             noteRound(T, "PAPER ${c.side} at ${(now - T) / 1000}s · ${String.format(us, "%.1f", price * 100)}¢ · edge ${String.format(us, "%+.1f", edge)}% · $source", price, edge)
             return Step(true, "paper bet ${c.side} ${String.format(us, "%.2f", cost)} USDT at ${String.format(us, "%.1f", price * 100)}¢ (edge ${String.format(us, "%+.1f", edge)}%)", placed = true)
         }
@@ -496,14 +518,16 @@ class Btc5mStructBook(private val store: Store, val mk: Btc5mStruct.Mk = Btc5mSt
 
     fun csv(): String {
         val us = java.util.Locale.US
-        val sb = StringBuilder("type,mode,round_utc_ms,side,p_up,backtest_win_p,price_per_share,edge_pct,open,projected_close,stake,order_id,status,result,pnl,note,market_open_at_s,market_listed_price,bet_at_s,market_diag\n")
+        val sb = StringBuilder("type,mode,round_utc_ms,side,p_up,backtest_win_p,price_per_share,edge_pct,open,projected_close,stake,order_id,status,result,pnl,note,market_open_at_s,market_listed_price,bet_at_s,market_diag,result_source,price_assumed\n")
+        val srcR = raw(ROUNDS).associate { it.getLong("T") to it.optString("src") }
+        val srcB = raw(BETS).associate { it.getLong("id") to it.optString("src") }
         val mk = raw(ROUNDS).filter { it.has("mkAt") }.associate { it.getLong("T") to (it.getLong("mkAt") to dOpt(it, "mkPx")) }
         val dg = raw(ROUNDS).filter { it.has("mkDiag") }.associate { it.getLong("T") to it.getString("mkDiag").replace("\"", "'").replace(",", ";") }
         val dts = raw(BETS).associate { it.getLong("id") to (if (it.has("dt")) it.getLong("dt").toString() else "") }
         for (r in rounds()) sb.append("round,,${r.T},${r.side},${String.format(us, "%.4f", r.p)},${r.winP ?: ""},${r.price ?: ""},${r.edge?.let { String.format(us, "%.2f", it) } ?: ""}," +
-            "${r.open},${String.format(us, "%.2f", r.projClose)},,,,${r.win?.let { if (it) "WIN" else "LOSS" } ?: if (r.up == 2) "TIE" else ""},,\"${r.note.replace("\"", "'")}\",${mk[r.T]?.first ?: ""},${mk[r.T]?.second ?: ""},,\"${dg[r.T] ?: ""}\"\n")
+            "${r.open},${String.format(us, "%.2f", r.projClose)},,,,${r.win?.let { if (it) "WIN" else "LOSS" } ?: if (r.up == 2) "TIE" else ""},,\"${r.note.replace("\"", "'")}\",${mk[r.T]?.first ?: ""},${mk[r.T]?.second ?: ""},,\"${dg[r.T] ?: ""}\",${srcR[r.T] ?: ""},\n")
         for (b in bets()) sb.append("bet,${b.mode},${b.T},${b.side},,${b.winP ?: ""},${String.format(us, "%.4f", b.share)},,,,${b.stake},${b.orderId ?: ""},${b.status}," +
-            "${b.win?.let { if (it) "WIN" else "LOSS" } ?: if (b.up == 2) "TIE" else ""},${b.pnl?.let { String.format(us, "%.4f", it) } ?: ""},,,,${dts[b.id] ?: ""},\n")
+            "${b.win?.let { if (it) "WIN" else "LOSS" } ?: if (b.up == 2) "TIE" else ""},${b.pnl?.let { String.format(us, "%.4f", it) } ?: ""},,,,${dts[b.id] ?: ""},,${srcB[b.id] ?: ""},${if (b.assumed) "YES" else ""}\n")
         return sb.toString()
     }
 }

@@ -45,6 +45,15 @@ object Staking {
         return maxOf(if (live) 1.5 else 0.1, r)
     }
 
+    /** smallest amount the exchange quotes (its order minimum) */
+    const val QUOTE_MIN = 1.5
+
+    /**
+     * PAPER quote size: the exchange refuses a quote above the account balance or below its minimum, so ask for the paper stake
+     * when the balance covers it, else for the balance; never below QUOTE_MIN. The paper bet then uses that real price per share.
+     */
+    fun paperQuoteAmount(stake: Double, balance: Double): Double { val room = balance * 0.97; return maxOf(QUOTE_MIN, if (room >= stake) stake else room) }   // 3% left for the fee
+
     fun title(mode: String) = when (mode) {
         "edge" -> "By edge"
         "tiers" -> "Edge tiers"

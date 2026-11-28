@@ -98,6 +98,25 @@ class StakingTest {
     }
 
     @Test
+    fun paperQuoteIsAlwaysOneTheExchangeAccepts() {
+        assertEquals(4.0, Staking.paperQuoteAmount(4.0, 50.0), 0.0)     // balance covers it: the paper stake itself
+        assertEquals(2.3 * 0.97, Staking.paperQuoteAmount(4.0, 2.3), 1e-12)   // balance too small ("enough USDT"): quote the balance less 3% for the fee
+        assertEquals(4.0, Staking.paperQuoteAmount(4.0, 4.2), 0.0)       // 4.2 x 0.97 = 4.07 covers 4.0
+        assertEquals(1.5, Staking.paperQuoteAmount(0.4, 50.0), 0.0)     // below the minimum ("too small"): quote 1.5
+        assertEquals(1.5, Staking.paperQuoteAmount(4.0, 0.8), 0.0)      // never below the minimum
+    }
+
+    @Test
+    fun marketResultReplacesBinanceEstimateNeverTheOtherWay() {
+        assertTrue(Btc5mStructBook.replaceResult(false, "", "binance TWAP calc"))          // no result yet: the estimate fills it
+        assertTrue(Btc5mStructBook.replaceResult(true, "binance TWAP calc", "market"))     // real result corrects the estimate
+        assertTrue(Btc5mStructBook.replaceResult(true, "", "market"))                       // old rows without a source too
+        assertTrue(!Btc5mStructBook.replaceResult(true, "market", "market"))               // a market result is final
+        assertTrue(!Btc5mStructBook.replaceResult(true, "market", "binance TWAP calc"))
+        assertTrue(!Btc5mStructBook.replaceResult(true, "binance TWAP calc", "binance TWAP calc"))
+    }
+
+    @Test
     fun bankrollIsTheLargestSpendableBalance() {
         val api = PredictionApi("k", "s")
         val bal = listOf(PredictionApi.Balance("SPOT", 40.0, true), PredictionApi.Balance("FUNDING", 90.0, true), PredictionApi.Balance("CeDeFi", 12.0, true))
